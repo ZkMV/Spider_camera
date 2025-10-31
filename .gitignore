@@ -1,0 +1,49 @@
+cat > .gitignore << 'EOF'
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+ENV/
+
+# C++
+*.o
+*.a
+*.out
+*.gch
+*.pch
+
+# Compiled shared libraries
+*.so
+*.dylib
+*.dll
+
+# Build artifacts
+spider_camera*.so
+*.cpython-*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.geany/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+EOF
