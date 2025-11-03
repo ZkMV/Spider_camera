@@ -12,6 +12,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <cerrno>
+#include <pybind11/stl.h> // Можливо, знадобиться для py::bytes
 
 // Logging macros
 #define LOG_INFO(msg)   std::cout << "[INFO]  " << msg << std::endl
@@ -113,7 +114,6 @@ SpiderCamera::~SpiderCamera() {
         cam_mgr_->stop();
     }
 }
-
 
 void SpiderCamera::set_cam(int cam_id) {
     if (state_ != 0) {
@@ -366,32 +366,33 @@ void SpiderCamera::go() {
     }
 
     LOG_INFO("Starting streaming...");
+
+    // (ВИПРАВЛЕННЯ ДЕДЛОКУ)
+    // Звільняємо GIL на час виконання блокуючих C++ операцій
+    py::gil_scoped_release release_gil;
     
     try {
-        // DON'T stop camera - it causes deadlock
-        // Camera will handle restart automatically
-        
-        // Reset requests
+        // Скидаємо реквести для повторного використання
         for (auto &request : requests_) {
             try {
                 request->reuse(libcamera::Request::ReuseBuffers);
-            } catch (...) {
-                // Ignore
+            } catch (const std::exception& e) {
+                LOG_WARN("Failed to reuse request buffer: " + std::string(e.what()));
             }
         }
         
-        // Start camera (it handles restart internally)
+        // Запускаємо камеру
         int ret = camera_->start();
-        if (ret && ret != -EACCES) {  // Ignore "already running"
+        if (ret) {
             throw std::runtime_error("Failed to start camera: " + std::to_string(ret));
         }
 
-        // Queue all initial requests
+        // Ставимо всі початкові запити в чергу
         for (auto &request : requests_) {
             camera_->queueRequest(request.get());
         }
         
-        // Start streaming flag and thread
+        // Встановлюємо прапор та запускаємо потік
         streaming_ = true;
         frame_count_ = 0;
         error_count_ = 0;
@@ -403,10 +404,12 @@ void SpiderCamera::go() {
         LOG_INFO("Streaming started (state 2)");
 
     } catch (const std::exception& e) {
+        // Повертаємо GIL перед тим, як кинути помилку в Python
+        py::gil_scoped_acquire acquire_gil;
         LOG_ERROR("Failed to start streaming: " << e.what());
         streaming_ = false;
-        state_ = 4;
-        throw;
+        state_ = 4; // Стан помилки
+        throw; // Прокидаємо помилку в Python
     }
 }
 
@@ -417,18 +420,31 @@ void SpiderCamera::pause() {
     }
 
     LOG_INFO("Pausing streaming...");
-    
+
+    // 1. Звільняємо GIL, щоб уникнути дедлоку
+    py::gil_scoped_release release_gil;
+
+    // 2. Встановлюємо прапор, щоб handle_request_complete
+    //    перестав відправляти кадри в Python
     streaming_ = false;
     
+    // 3. Чекаємо на завершення нашого допоміжного потоку
     if (stream_thread_) {
         if (stream_thread_->joinable()) {
-            stream_thread_->detach();
+            stream_thread_->join();
         }
         stream_thread_.reset();
     }
     
-    // Longer delay to let requests complete
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    // 4. Тепер безпечно зупиняємо пайплайн libcamera
+    try {
+        if (camera_) {
+            camera_->stop();
+            LOG_INFO("Camera pipeline stopped");
+        }
+    } catch (const std::exception& e) {
+        LOG_WARN("Exception during camera->stop() in pause: " << e.what());
+    }
     
     state_ = 1;
     LOG_INFO("Streaming paused (state 1)");
@@ -447,143 +463,103 @@ void SpiderCamera::stream_loop() {
 }
 
 void SpiderCamera::handle_request_complete(libcamera::Request *request) {
+    
+    // 1. Якщо libcamera скасувала запит (під час stop()),
+    //    просто виходимо. Це чисте завершення.
     if (request->status() == libcamera::Request::RequestCancelled) {
         LOG_DEBUG("Request was cancelled");
-        return;
+        return; 
     }
 
+    // (КЛЮЧОВЕ ВИПРАВЛЕННЯ)
+    // 2. Якщо запит НЕ "Complete" (тобто "Failed" або інша помилка),
+    //    реєструємо помилку і (важливо!) НЕ повертаємо його в чергу.
     if (request->status() != libcamera::Request::RequestComplete) {
-        LOG_ERROR("Request failed: frame dropped");
+        LOG_ERROR("Request failed (status: " << request->status() << "), frame dropped.");
         error_count_++;
-        
-        // Requeue request anyway
-        request->reuse(libcamera::Request::ReuseBuffers);
-        camera_->queueRequest(request);
+        // Просто виходимо. Цей запит/буфер втрачено для пайплайну.
         return;
     }
 
-    // Get the buffer
-    const std::map<const libcamera::Stream *, libcamera::FrameBuffer *> &buffers = 
-        request->buffers();
+    // 3. ЗАПИТ УСПІШНИЙ (`RequestComplete`) - обробляємо кадр
     
-    if (buffers.empty()) {
-        LOG_ERROR("No buffers in completed request");
-        return;
-    }
+    // Перевіряємо, чи ми все ще в режимі стрімінгу і чи немає помилок
+    if (streaming_ && frame_callback_ && error_count_ < 10) {
+        try {
+            const std::map<const libcamera::Stream *, libcamera::FrameBuffer *> &buffers = 
+                request->buffers();
+            
+            if (buffers.empty()) {
+                LOG_ERROR("No buffers in completed request");
+            } else {
+                libcamera::FrameBuffer *buffer = buffers.begin()->second;
+                frame_count_++;
 
-    libcamera::FrameBuffer *buffer = buffers.begin()->second;
-    
-    frame_count_++;
-    
-    LOG_DEBUG("Frame #" << frame_count_ << ": " << frame_width_ << "x" << frame_height_);
+                // (Ваш код логування FPS)
+                if (frame_count_ % 10 == 0) {
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - fps_start_time_).count();
+                    if (elapsed > 0) {
+                        double fps = 10000.0 / elapsed;
+                        LOG_INFO("Frame rate: " << std::fixed << std::setprecision(1) << fps << " fps");
+                    }
+                    fps_start_time_ = now;
+                }
 
-    // FPS logging every 10 frames
-    if (frame_count_ % 10 == 0) {
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - fps_start_time_).count();
-        
-        if (elapsed > 0) {
-            double fps = 10000.0 / elapsed;
-            LOG_INFO("Frame rate: " << std::fixed << std::setprecision(1) << fps << " fps");
+                // (Ваш код копіювання сирих байтів)
+                const libcamera::FrameBuffer::Plane &plane = buffer->planes()[0];
+                void *data = mmap(nullptr, plane.length, PROT_READ, MAP_SHARED, 
+                                 plane.fd.get(), 0);
+                
+                if (data == MAP_FAILED) {
+                    LOG_ERROR("Failed to mmap buffer");
+                    error_count_++;
+                } else {
+                    // Блок виклику Python
+                    {
+                        std::lock_guard<std::mutex> lock(callback_mutex_);
+                        if (streaming_ && frame_callback_ && error_count_ < 10) {
+                            try {
+                                py::gil_scoped_acquire gil;
+                                py::array_t<uint8_t> arr(plane.length);
+                                auto buf = arr.request();
+                                uint8_t* ptr = static_cast<uint8_t*>(buf.ptr);
+                                std::memcpy(ptr, data, plane.length);
+                                
+                                frame_callback_(arr);
+
+                            } catch (const py::error_already_set& e) {
+                                py::gil_scoped_acquire gil;
+                                LOG_ERROR("Python callback failed: " << e.what());
+                                error_count_++;
+                                if (error_count_ >= 10) {
+                                    LOG_ERROR("Too many callback errors (10+). Suppressing Python callbacks.");
+                                    state_ = 4;
+                                }
+                            }
+                        } // кінець if (streaming_...)
+                    } // Mutex звільнено
+                    munmap(data, plane.length);
+                } // кінець else (mmap)
+            } // кінець else (buffers.empty)
+        } catch (const std::exception& e) {
+            LOG_ERROR("Frame conversion failed: " << e.what());
         }
-        
-        fps_start_time_ = now;
-    }
+    } // кінець if (streaming_...)
 
-	// Convert to NumPy and call Python callback
-    try {
-        // Спочатку отримуємо RAW дані БЕЗ NumPy
-        // (тут буде спрощена версія convert_to_numpy)
-        
-        // Отримуємо plane
-        const libcamera::FrameBuffer::Plane &plane = buffer->planes()[0];
-        
-        // Map buffer
-        void *data = mmap(nullptr, plane.length, PROT_READ, MAP_SHARED, 
-                         plane.fd.get(), 0);
-        
-        if (data == MAP_FAILED) {
-            LOG_ERROR("Failed to mmap buffer");
-            error_count_++;
+
+    // (КЛЮЧОВЕ ВИПРАВЛЕННЯ)
+    // Ми повертаємо запит в чергу, ТІЛЬКИ ЯКЩО він був успішним
+    // і ми все ще в режимі стрімінгу (щоб 'pause' працював).
+    if (streaming_) {
+        try {
             request->reuse(libcamera::Request::ReuseBuffers);
             camera_->queueRequest(request);
-            return;
+        } catch (const std::exception &e) {
+            LOG_ERROR("Failed to re-queue successful request: " << e.what());
         }
-        
-        // Unpack RAW10 to vector
-        size_t pixel_count = frame_width_ * frame_height_;
-        std::vector<uint16_t> unpacked(pixel_count);
-        
-        const uint8_t* packed = static_cast<const uint8_t*>(data);
-        size_t out_idx = 0;
-        
-        for (size_t i = 0; i < pixel_count && out_idx < pixel_count; i += 4) {
-            size_t byte_idx = (i * 5) / 4;
-            if (byte_idx + 4 >= plane.length) break;
-            
-            unpacked[out_idx++] = (static_cast<uint16_t>(packed[byte_idx + 0]) << 2) | 
-                                 ((packed[byte_idx + 4] >> 0) & 0x3);
-            if (out_idx >= pixel_count) break;
-            unpacked[out_idx++] = (static_cast<uint16_t>(packed[byte_idx + 1]) << 2) | 
-                                 ((packed[byte_idx + 4] >> 2) & 0x3);
-            if (out_idx >= pixel_count) break;
-            unpacked[out_idx++] = (static_cast<uint16_t>(packed[byte_idx + 2]) << 2) | 
-                                 ((packed[byte_idx + 4] >> 4) & 0x3);
-            if (out_idx >= pixel_count) break;
-            unpacked[out_idx++] = (static_cast<uint16_t>(packed[byte_idx + 3]) << 2) | 
-                                 ((packed[byte_idx + 4] >> 6) & 0x3);
-        }
-        
-        munmap(data, plane.length);
-        
-        // Визначаємо реальні розміри
-        size_t actual_height = out_idx / frame_width_;
-        size_t actual_width = frame_width_;
-        size_t actual_pixels = actual_height * actual_width;
-        
-        LOG_DEBUG("Unpacked " << actual_pixels << " pixels (" << actual_width << "x" << actual_height << ")");
-        
-        // ТЕПЕР захоплюємо GIL і створюємо NumPy
-        {
-            std::lock_guard<std::mutex> lock(callback_mutex_);
-            if (frame_callback_) {
-                py::gil_scoped_acquire gil;
-                
-                // Створюємо NumPy array ТУТ, де є GIL
-                py::array_t<uint16_t> arr(
-                    {static_cast<py::ssize_t>(actual_height), 
-                     static_cast<py::ssize_t>(actual_width)}
-                );
-                
-                auto buf = arr.request();
-                uint16_t* ptr = static_cast<uint16_t*>(buf.ptr);
-                std::memcpy(ptr, unpacked.data(), actual_pixels * sizeof(uint16_t));
-                
-                // Викликаємо callback
-                frame_callback_(arr);
-                error_count_ = 0;
-            }
-        }
-        
-        LOG_DEBUG("Callback sent to Python");
-        
-    } catch (const py::error_already_set& e) {
-        LOG_ERROR("Python callback failed: " << e.what());
-        error_count_++;
-        
-        if (error_count_ >= 10) {
-            LOG_ERROR("Too many callback errors (10+), pausing stream");
-            streaming_ = false;
-            state_ = 4;
-        }
-    } catch (const std::exception& e) {
-        LOG_ERROR("Frame conversion failed: " << e.what());
     }
-
-    // Requeue the request
-    request->reuse(libcamera::Request::ReuseBuffers);
-    camera_->queueRequest(request);
 }
 
 int SpiderCamera::get_state() const {

@@ -4,6 +4,7 @@ demo_python.py
 
 Test script for SpiderCamera v0.2
 Tests streaming, frame capture, and callback functionality.
+(Updated to handle raw uint8 1D array from C++)
 """
 
 import sys
@@ -37,19 +38,21 @@ class FrameCounter:
         self.frames = []
         self.start_time = time.time()
     
-    def on_frame(self, frame):
+    def on_frame(self, frame: np.ndarray):
         self.count += 1
         
         # Store first 3 frames for analysis
         if len(self.frames) < 3:
-            self.frames.append(frame.copy())
+            if frame.size > 0:
+                self.frames.append(frame.copy())
         
         # Print info for first few frames
         if self.count <= 5:
             print(f"   Frame #{self.count}:")
+            # (ОНОВЛЕНО)
             print(f"      Shape: {frame.shape}")
             print(f"      Dtype: {frame.dtype}")
-            print(f"      Min: {frame.min()}, Max: {frame.max()}, Mean: {frame.mean():.1f}")
+            print(f"      Size (bytes): {frame.size}")
     
     def get_fps(self):
         if self.start_time and self.count > 0:
@@ -69,7 +72,6 @@ def test_v02_streaming():
     # Create camera instance
     print("📷 Creating SpiderCamera instance...")
     cam = spider_camera.SpiderCamera()
-    #cam.enable_debug(True) Вмикає дебаг під час стрімінга спайдером
     
     if cam.get_state() == 4:
         print("❌ ERROR: Camera initialization failed!")
@@ -142,22 +144,20 @@ def test_v02_streaming():
     print("📷 Analyzing captured frames...")
     if len(counter.frames) > 0:
         frame = counter.frames[0]
+        # (ОНОВЛЕНО)
         print(f"   Frame shape: {frame.shape}")
         print(f"   Frame dtype: {frame.dtype}")
-        print(f"   Value range: {frame.min()} - {frame.max()}")
-        print(f"   Expected: uint16, values 0-1023 (10-bit)")
-        
-        # Check Bayer pattern (simple check)
-        if frame.shape[0] > 2 and frame.shape[1] > 2:
-            # Check if there's variation (not all zeros)
-            if frame.std() > 10:
-                print(f"   ✅ Frame data looks valid (std: {frame.std():.1f})")
-            else:
-                print(f"   ⚠️  WARNING: Frame data has low variation")
-        
-        # Check if data is in expected range
-        if frame.dtype == np.uint16 and frame.max() <= 1023:
-            print(f"   ✅ Data format correct (10-bit in uint16)")
+        print(f"   Frame size (bytes): {frame.size}")
+        print(f"   Expected: uint8, 1D array (raw compressed bytes)")
+
+        # Перевіряємо, чи є дані
+        if frame.size > 1000: # Просто перевіряємо, що це не пустий буфер
+            print(f"   ✅ Frame data looks valid (size > 1000 bytes)")
+        else:
+            print(f"   ⚠️  WARNING: Frame data is very small or empty")
+            
+        if frame.dtype == np.uint8:
+            print(f"   ✅ Data format correct (uint8)")
         else:
             print(f"   ⚠️  WARNING: Unexpected data format")
     else:
@@ -268,10 +268,16 @@ def test_error_handling():
     
     try:
         cam.go()
-        time.sleep(0.5)
+        time.sleep(0.5) # Даємо час, щоб помилки накопичились
         cam.pause()
         print(f"   ✅ Streaming continued despite callback exception")
         print(f"   Captured {counter.count} frames")
+        
+        if cam.get_state() == 4:
+            print(f"   ✅ Camera correctly entered error state 4")
+        else:
+            print(f"   ⚠️  WARNING: Camera did not enter error state 4")
+            
     except Exception as e:
         print(f"   ⚠️  Unexpected exception: {e}")
     finally:
@@ -282,62 +288,26 @@ def test_error_handling():
 
 
 def test_bayer_pattern():
-    """Verify Bayer pattern structure"""
+    """
+    (ОНОВЛЕНО)
+    This test is now DEPRECATED as we receive a raw compressed 
+    uint8 buffer, not an uncompressed uint16 Bayer pattern.
+    """
     
     print()
     print("=" * 70)
-    print("  Bayer Pattern Verification")
+    print("  Bayer Pattern Verification (SKIPPED)")
     print("=" * 70)
     print()
-    
-    cam = spider_camera.SpiderCamera()
-    cam.set_cam(0)
-    cam.be_ready()
-    
-    counter = FrameCounter()
-    cam.set_frame_callback(counter.on_frame)
-    
-    cam.go()
-    time.sleep(0.5)
-    cam.pause()
-    cam.stop()
-    
-    if len(counter.frames) > 0:
-        frame = counter.frames[0]
-        print(f"📷 Frame analysis:")
-        print(f"   Shape: {frame.shape}")
-        print(f"   Dtype: {frame.dtype}")
-        print()
-        
-        # Sample 2x2 block from center
-        h, w = frame.shape
-        cy, cx = h // 2, w // 2
-        block = frame[cy:cy+2, cx:cx+2]
-        
-        print(f"   Sample 2x2 block from center:")
-        print(f"   [{block[0,0]:4d} {block[0,1]:4d}]  <- R  G")
-        print(f"   [{block[1,0]:4d} {block[1,1]:4d}]  <- G  B")
-        print()
-        print(f"   (RGGB Bayer pattern expected)")
-        print()
-        
-        # Check if all corners have different statistics (rough check)
-        tl = frame[0:h//2, 0:w//2].mean()
-        tr = frame[0:h//2, w//2:w].mean()
-        bl = frame[h//2:h, 0:w//2].mean()
-        br = frame[h//2:h, w//2:w].mean()
-        
-        print(f"   Quadrant means:")
-        print(f"   TL: {tl:.1f}  TR: {tr:.1f}")
-        print(f"   BL: {bl:.1f}  BR: {br:.1f}")
-        print()
-        
-        if abs(tl - br) > 10 or abs(tr - bl) > 10:
-            print(f"   ✅ Quadrants show variation (good sign)")
-        else:
-            print(f"   ⚠️  Low variation between quadrants")
-    
+    print("   Test skipped: Receiving raw uint8 buffer, not uint16 Bayer.")
+    print()
     return True
+    
+    # (Старий код закоментовано)
+    # cam = spider_camera.SpiderCamera()
+    # cam.set_cam(0)
+    # cam.be_ready()
+    # ...
 
 
 if __name__ == "__main__":
@@ -352,7 +322,10 @@ if __name__ == "__main__":
     
     # Additional tests
     test_error_handling()
-    test_bayer_pattern()
+    
+    # (ОНОВЛЕНО)
+    # Більше не викликаємо цей тест, оскільки він не актуальний
+    # test_bayer_pattern()
     
     print()
     print("🎉 SpiderCamera v0.2 is working correctly!")
@@ -360,7 +333,7 @@ if __name__ == "__main__":
     print("Next steps:")
     print("  → Test with longer captures (10+ seconds)")
     print("  → Implement v0.3 for hot parameter control")
-    print("  → Verify FPS stability under load")
+    print("  → Implement Python-side unpacking of the raw buffer (if needed)")
     print()
     
     sys.exit(0)
