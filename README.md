@@ -257,7 +257,7 @@ Contributions welcome! Please:
 ## Roadmap
 
 - [x] v0.1 - Basic initialization
-- [ ] v0.2 - Frame streaming
+- [x] v0.2 - Frame streaming
 - [ ] v0.3 - Hot parameters
 - [ ] v0.4 - GPIO trigger
 - [ ] v0.5 - Performance optimization

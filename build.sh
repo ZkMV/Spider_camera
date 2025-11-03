@@ -40,6 +40,7 @@ echo ""
 echo "Compiling SpiderCamera..."
 $CXX $CXXFLAGS $INCLUDES \
     src/spider_camera.cpp \
+    src/frame_buffer.cpp \
     bindings/pybind_spider.cpp \
     $LDFLAGS $LIBS \
     -o $OUTPUT

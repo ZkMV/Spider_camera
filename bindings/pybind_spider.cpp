@@ -41,10 +41,14 @@ PYBIND11_MODULE(spider_camera, m) {
         
         .def("pause", &SpiderCamera::pause, 
              "Pauses the frame capture stream (Not implemented in v0.1)")
-
+		
         .def("set_frame_callback", &SpiderCamera::set_frame_callback,
              py::arg("callback"),
              "Sets the Python callback function to receive frame data (as numpy array)")
+		
+        .def("enable_debug", &SpiderCamera::enable_debug,
+             py::arg("enable"),
+             "Enable or disable debug logging")
 
         // --- v0.3 Methods (Stubs) ---
         .def("set_iso", &SpiderCamera::set_iso, py::arg("iso"), "Set ISO value (0-4000)")
