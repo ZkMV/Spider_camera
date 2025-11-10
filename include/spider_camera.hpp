@@ -1,7 +1,7 @@
 /*
  * spider_camera.hpp
  *
- * Header file for the SpiderCamera library (v0.2).
+ * Header file for the SpiderCamera library (v0.2.8 - Burst Capture).
  * Defines the main class for camera control and state management.
  */
 
@@ -12,19 +12,23 @@
 #include <libcamera/camera.h>
 #include <libcamera/framebuffer_allocator.h>
 #include <libcamera/request.h>
+#include <libcamera/pixel_format.h>
 
 #include <pybind11/pybind11.h>
 #include <pybind11/functional.h>
 #include <pybind11/numpy.h>
+
+#include "pisp_decompress.hpp"
+#include "frame_buffer.hpp"
 
 #include <memory>
 #include <functional>
 #include <string>
 #include <thread>
 #include <atomic>
-#include <mutex>
+#include <mutex> // <--- v0.2.8: Додано
 #include <chrono>
-#include <vector>
+#include <vector> // <--- v0.2.8: Додано
 
 namespace py = pybind11;
 
@@ -41,66 +45,31 @@ public:
     ~SpiderCamera();
 
     // --- v0.1 Methods ---
-
-    /**
-     * @brief Selects the active camera by its index.
-     * Must be called when state is 0 (off).
-     * @param cam_id The index of the camera (e.g., 0).
-     */
     void set_cam(int cam_id);
-
-    /**
-     * @brief Gets the ID of the currently selected camera.
-     * @return Camera ID, or -1 if none is selected.
-     */
     int get_cam() const;
-
-    /**
-     * @brief Prepares the camera for streaming (v0.1 state 1).
-     * Acquires the camera, creates a RAW configuration, and validates it.
-     */
     void be_ready();
-
-    /**
-     * @brief Stops all activity and releases the camera.
-     * Returns the state to 0 (off).
-     */
     void stop();
-
-    /**
-     * @brief Gets the current state of the camera.
-     * 0 = off
-     * 1 = ready
-     * 2 = streaming (for v0.2)
-     * 4 = error
-     * @return The current state code.
-     */
     int get_state() const;
 
     // --- v0.2 Methods ---
-
-    /**
-     * @brief Starts the frame capture stream (state: 1 → 2).
-     */
     void go();
-
-    /**
-     * @brief Pauses the frame capture stream (state: 2 → 1).
-     */
     void pause();
-
+    
     /**
-     * @brief Registers the Python callback function to receive frames.
-     * @param callback A Python function (or callable) that accepts one
-     * argument (the frame data as a numpy array).
+     * @brief [v0.2.8: НЕ ВИКОРИСТОВУЄТЬСЯ в режимі 'burst']
+     * Registers the Python callback function to receive frames.
      */
-    void set_frame_callback(std::function<void(py::array)> callback);
-
-    /**
-     * @brief Enable or disable debug logging.
-     * @param enable True to enable debug logs
-     */
+    void set_frame_callback(std::function<void(py::array, double)> callback);
+    
     void enable_debug(bool enable);
+
+    // --- v0.2.8: Новий метод ---
+    /**
+     * @brief Processes all buffered frames, decompresses them,
+     * and returns them as a list of NumPy arrays.
+     * @return A py::list of NumPy arrays (uint16).
+     */
+    py::list get_burst_frames();
 
     // --- v0.3+ Methods (stubs) ---
     void set_iso(int iso) { /* Not implemented yet */ }
@@ -119,55 +88,28 @@ public:
     int get_spider_gpio() const { return -1; }
 
 private:
-    /**
-     * @brief Helper function to create a default RAW stream configuration.
-     * @return A unique_ptr to the generated configuration.
-     */
     std::unique_ptr<libcamera::CameraConfiguration> create_raw_config();
-
-    /**
-     * @brief Helper function to safely release the camera and config.
-     */
     void release_camera();
-
-    /**
-     * @brief Allocates frame buffers for the configured stream.
-     */
     void allocate_buffers();
-
-    /**
-     * @brief Creates Request objects and associates them with buffers.
-     */
     void create_requests();
-
+    
     /**
-     * @brief Signal handler called when a request is completed.
-     * @param request The completed request
+     * @brief [v0.2.8: Змінено] Signal handler. Now copies compressed 
+     * frame data into the burst buffer instead of decompressing.
      */
     void handle_request_complete(libcamera::Request *request);
-
-    /**
-     * @brief Thread function for streaming loop.
-     */
+    
     void stream_loop();
-
-    /**
-     * @brief Converts a RAW10 FrameBuffer to NumPy array.
-     * @param buffer The frame buffer to convert
-     * @return NumPy array with uint16 Bayer data
-     */
-    py::array convert_to_numpy(libcamera::FrameBuffer *buffer);
+    py::array convert_to_numpy(libcamera::FrameBuffer *buffer); // (Deprecated)
 
     // --- Member Variables ---
-
-    std::atomic<int> state_{0}; // 0=off, 1=ready, 2=streaming, 4=error
+    std::atomic<int> state_{0};
     int active_camera_id_ = -1;
 
     std::shared_ptr<libcamera::CameraManager> cam_mgr_;
     std::shared_ptr<libcamera::Camera> camera_;
     std::unique_ptr<libcamera::CameraConfiguration> config_;
 
-    // v0.2 additions
     std::unique_ptr<libcamera::FrameBufferAllocator> allocator_;
     std::vector<std::unique_ptr<libcamera::Request>> requests_;
     
@@ -175,16 +117,34 @@ private:
     std::atomic<bool> streaming_{false};
     std::atomic<bool> debug_enabled_{false};
     
-    std::function<void(py::array)> frame_callback_;
+    std::function<void(py::array, double)> frame_callback_;
     std::mutex callback_mutex_;
     
     std::atomic<int> error_count_{0};
     std::atomic<uint64_t> frame_count_{0};
     std::chrono::steady_clock::time_point fps_start_time_;
     
-    // Frame dimensions (set during configuration)
     uint32_t frame_width_ = 0;
     uint32_t frame_height_ = 0;
+    libcamera::PixelFormat current_pixel_format_;
+
+    // v0.2.3 -> v0.2.8: 
+    // Буфер для розпаковки (використовується в get_burst_frames)
+    std::vector<uint16_t> decompression_buffer_;
+
+    // --- v0.2.8: Нові змінні для Burst Capture ---
+    
+    /**
+     * @brief Buffer to store raw, compressed frame data
+     * (e.g., PISP_COMP1 8-bit data) during 'go()'.
+     */
+    std::vector<std::vector<uint8_t>> compressed_frame_buffer_;
+    
+    /**
+     * @brief Mutex to protect 'compressed_frame_buffer_' from 
+     * race conditions (camera thread vs python thread).
+     */
+    std::mutex burst_buffer_mutex_;
 };
 
 #endif // SPIDER_CAMERA_HPP

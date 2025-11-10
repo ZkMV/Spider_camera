@@ -3,12 +3,13 @@
  *
  * Pybind11 wrapper definitions for the SpiderCamera library.
  * This file creates the Python module 'spider_camera'.
+ * v0.2.8: Added get_burst_frames() binding
  */
 
 #include "spider_camera.hpp"
 #include <pybind11/pybind11.h>
 #include <pybind11/functional.h> // For set_frame_callback
-#include <pybind11/stl.h>       // For std::vector, std::string
+#include <pybind11/stl.h>       // For std::vector, std::string, py::list
 
 namespace py = pybind11;
 
@@ -37,14 +38,13 @@ PYBIND11_MODULE(spider_camera, m) {
 
         // --- v0.2+ Methods ---
         .def("go", &SpiderCamera::go, 
-             "Starts the frame capture stream (Not implemented in v0.1)")
+             "Starts the frame capture stream")
         
         .def("pause", &SpiderCamera::pause, 
-             "Pauses the frame capture stream (Not implemented in v0.1)")
+             "Pauses the frame capture stream")
 		
         .def("set_frame_callback", &SpiderCamera::set_frame_callback,
-             py::arg("callback"),
-             "Sets the Python callback function to receive frame data (as numpy array)")
+			"Register callback (not used in burst mode)")
 		
         .def("enable_debug", &SpiderCamera::enable_debug,
              py::arg("enable"),
@@ -64,6 +64,9 @@ PYBIND11_MODULE(spider_camera, m) {
         .def("set_spider_trigger", &SpiderCamera::set_spider_trigger, py::arg("enable"), "Enable or disable the GPIO trigger mode")
         .def("get_spider_trigger", &SpiderCamera::get_spider_trigger, "Get current GPIO trigger mode state")
         .def("set_spider_gpio", &SpiderCamera::set_spider_gpio, py::arg("pin"), "Set the GPIO pin number for the trigger")
-        .def("get_spider_gpio", &SpiderCamera::get_spider_gpio, "Get the current GPIO pin number");
+        .def("get_spider_gpio", &SpiderCamera::get_spider_gpio, "Get the current GPIO pin number")
 
+        // --- v0.2.8: НОВА ПРИВ'ЯЗКА ---
+        .def("get_burst_frames", &SpiderCamera::get_burst_frames,
+             "Get all buffered frames and decompress them (v0.2.8)");
 }

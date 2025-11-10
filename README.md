@@ -2,26 +2,29 @@
 
 **High-performance RAW camera capture library for Raspberry Pi**
 
-SpiderCamera is a C++ wrapper around libcamera designed for high-speed RAW frame capture with Python bindings via pybind11. Built specifically for Raspberry Pi with GPIO trigger support.
+SpiderCamera is a C++ wrapper around libcamera designed for high-speed RAW frame capture with Python bindings via pybind11. It targets Raspberry Pi boards and provides in-memory burst capture with planned support for hot parameter updates and GPIO triggers.
 
 ## Features
 
-- 🎥 RAW format streaming (10-bit/12-bit Bayer)
-- 🐍 Python interface via pybind11
-- ⚡ Hot parameter changes (ISO, exposure, resolution, focus)
-- 🔌 GPIO hardware trigger support
-- 🚀 ~14 fps capture performance
-- 💾 In-memory frame delivery (no disk writes)
+* 🎥 RAW format streaming (10-bit / 12-bit Bayer)
+* 🐍 Python interface via pybind11
+* 🚀 **~14 fps burst capture performance** at 4608×2592
+* 📈 **PISP_COMP1 8-bit RAW decompression** support
+* 💾 In-memory "burst" frame buffering via `get_burst_frames()`
+* 📋 Hot parameter changes (ISO, exposure, resolution, focus) — **planned for v0.3**
+* 🔌 GPIO hardware trigger support — **planned for v0.4**
 
 ## Requirements
 
-- Raspberry Pi with libcamera support
-- Python 3.11+
-- libcamera-dev
-- libgpiod-dev (for v0.4+)
-- pybind11
+* Raspberry Pi with libcamera support
+* Python 3.11+
+* `libcamera-dev`
+* `libgpiod-dev` (for v0.4+)
+* `pybind11`
+* `opencv-python-headless` (for processing/saving frames in Python)
 
 ## Quick Start
+
 ```bash
 # Clone repository
 git clone https://github.com/YOUR_USERNAME/SpiderCamera.git
@@ -30,7 +33,9 @@ cd SpiderCamera
 # Setup virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
-pip install pybind11 numpy
+
+# Install dependencies
+pip install pybind11 numpy opencv-python-headless
 
 # Build
 chmod +x build.sh
@@ -40,72 +45,96 @@ chmod +x build.sh
 python3 examples/demo_python.py
 ```
 
-## Usage Example
+## Usage Example (v0.2 Burst Capture)
+
 ```python
+import time
 import spider_camera
 
 # Initialize
 cam = spider_camera.SpiderCamera()
 cam.set_cam(0)
+
+# Prepare camera (e.g. 4056×3040 @ ~14 fps)
 cam.be_ready()
 
-# Configure (v0.3+)
-cam.set_iso(1600)
-cam.set_exposure(10000)  # microseconds
-cam.set_resolution(1920, 1080)
-
-# Start streaming (v0.2+)
-def on_frame(frame):
-    print(f"Frame: {frame.shape}")
-
-cam.set_frame_callback(on_frame)
+# Start capturing
 cam.go()
 
-# Stop
+# Capture for 2 seconds
+time.sleep(2.0)
+
+# Pause capturing (keep camera ready)
 cam.pause()
+
+# Get all captured frames
+# This also performs C++-side decompression
+frame_list = cam.get_burst_frames()
+print(f"Captured {len(frame_list)} frames.")
+
+# TODO: process/save frames in Python (e.g. via OpenCV)
+
+# Stop and release resources
 cam.stop()
 ```
 
 ## API Reference
 
 ### Core Methods (v0.1)
-- `set_cam(id)` — Select camera by index
-- `get_cam()` — Get current camera ID
-- `be_ready()` — Prepare camera (state: 0 → 1)
-- `stop()` — Stop and release camera (state → 0)
-- `get_state()` — Get current state (0=off, 1=ready, 2=streaming, 4=error)
+
+* `set_cam(id)` — select camera by index.
+* `get_cam()` — get current camera ID.
+* `be_ready()` — prepare camera (state transition: `0 → 1`).
+* `stop()` — stop and release camera (state transition: `* → 0`).
+* `get_state()` — get current state:
+
+  * `0` — off
+  * `1` — ready
+  * `2` — streaming
+  * `4` — error
 
 ### Streaming Methods (v0.2+)
-- `go()` — Start RAW frame capture
-- `pause()` — Pause streaming
-- `set_frame_callback(callback)` — Register Python callback for frames
 
-### Hot Parameters (v0.3+)
-- `set_iso(value)` / `get_iso()` — ISO 0-4000
-- `set_exposure(us)` / `get_exposure()` — Exposure time in microseconds
-- `set_resolution(w, h)` / `get_resolution()` — Frame resolution
-- `set_focus(mm)` / `get_focus()` — Focus distance 0-20mm
+* `go()` — start RAW frame capture (state: `1 → 2`).
+* `pause()` — pause streaming, keep camera configured (state: `2 → 1`).
+* `get_burst_frames() -> list[np.ndarray]` — **(NEW in v0.2.8)** return all buffered frames as a list of NumPy arrays; performs decompression in C++ before passing frames to Python.
+* `set_frame_callback(callback)` — **deprecated in v0.2.8**; not recommended for high-speed capture. Prefer `get_burst_frames()`.
 
-### GPIO Trigger (v0.4+)
-- `set_spider_gpio(pin)` / `get_spider_gpio()` — Set GPIO pin number
-- `set_spider_trigger(bool)` / `get_spider_trigger()` — Enable/disable trigger
-  - HIGH = streaming active
-  - LOW = paused/stopped
+### Hot Parameters (v0.3+, planned)
+
+*Planned for v0.3 — not yet implemented.*
+
+* `set_iso(value)` / `get_iso()` — control sensor gain.
+* `set_exposure(us)` / `get_exposure()` — shutter time in microseconds.
+* `set_resolution(w, h)` / `get_resolution()` — change capture resolution.
+* `set_focus(mm)` / `get_focus()` — lens focus position (in millimetres or device units).
+
+### GPIO Trigger (v0.4+, planned)
+
+*Planned for v0.4 — not yet implemented.*
+
+* `set_spider_gpio(pin)` / `get_spider_gpio()` — configure GPIO pin used for SpiderCamera trigger.
+* `set_spider_trigger(enabled: bool)` / `get_spider_trigger()` — hardware trigger mode:
+
+  * HIGH = streaming
+  * LOW  = paused
 
 ## Project Structure
-```
+
+```text
 SpiderCamera/
 ├── include/
-│   └── spider_camera.hpp        # C++ API interface
+│   ├── spider_camera.hpp        # C++ API interface
+│   └── pisp_decompress.hpp      # Decompressor header
 ├── src/
 │   ├── spider_camera.cpp        # Core implementation
-│   ├── camera_controller.cpp    # libcamera management
-│   ├── gpio_controller.cpp      # GPIO trigger logic
-│   └── frame_buffer.cpp         # Frame buffer handling
+│   ├── pisp_decompress.cpp      # PISP_COMP1 decompressor
+│   ├── frame_buffer.cpp         # Frame buffer handling (CSI2P)
+│   └── ...                      # Other internal sources
 ├── bindings/
-│   └── pybind_spider.cpp        # Python bindings
+│   └── pybind_spider.cpp        # Python bindings (pybind11)
 ├── examples/
-│   └── demo_python.py           # Test scripts
+│   └── demo_python.py           # Test script (burst capture)
 ├── build.sh                     # Build script
 └── Specification.md             # Technical specification
 ```
@@ -117,158 +146,82 @@ SpiderCamera/
 **Status:** ✅ Complete and tested
 
 **Features:**
-- Camera manager initialization
-- Camera selection (`set_cam()`)
-- RAW configuration (SRGGB10_CSI2P format)
-- State management (0=off, 1=ready, 4=error)
-- Resource cleanup (`stop()`)
-- Pybind11 Python bindings
-- Test suite
 
-**Tested on:**
-- Raspberry Pi 5 / BCM2712_D0
-- IMX708 camera sensor
-- Resolution: 1536x864 @ 10-bit RAW
-- libcamera v0.5.2
+* Camera manager initialization.
+* Camera selection via `set_cam()`.
+* Basic RAW configuration and state management.
 
-**Changes:**
-```
-+ spider_camera.hpp - Core class definition
-+ spider_camera.cpp - Implementation
-+ pybind_spider.cpp - Python bindings
-+ demo_python.py - Test suite
-+ build.sh - Compilation script
-```
+### v0.2 — Burst Frame Streaming (2025-11-10)
 
----
+**Status:** ✅ Complete and tested
 
-### v0.2 — Frame Streaming (planned)
+**Features:**
 
-**Status:** 🚧 In development
-
-**Planned Features:**
-- `go()` / `pause()` methods
-- Request queue management
-- Event loop in separate thread
-- RAW frame capture to memory
-- NumPy array delivery to Python
-- Frame callback mechanism
-- State 2 (streaming)
-
----
+* `go()` / `pause()` methods for streaming control.
+* New architecture: burst capture mode.
+* `get_burst_frames()` — C++-side decompression and delivery of all buffered frames to Python as a list of NumPy arrays.
+* PISP_COMP1 8-bit compressed RAW decompression via LUT.
+* Increased buffer count (`-bufferCount 8`) to prevent pipeline stalls.
+* Performance: stable ~13–14 fps at 4608×2592 (12 MP) resolution.
+* Hard-coded capture settings in C++ loop (14 fps, ISO 4000, 100 µs exposure).
 
 ### v0.3 — Hot Parameters (planned)
 
 **Status:** 📋 Not started
 
-**Planned Features:**
-- Live ISO adjustment (0-4000)
-- Live exposure control (microseconds)
-- Live resolution changes
-- Live focus adjustment (0-20mm)
-- No camera restart required
+**Planned features:**
 
----
+* Implement Python setters (`set_iso`, `set_exposure`, etc.).
+* Pass parameters from Python to C++ controls inside the `go()` loop.
+* Allow changing parameters "live" while in `pause()` state.
 
 ### v0.4 — GPIO Trigger (planned)
 
 **Status:** 📋 Not started
 
-**Planned Features:**
-- GPIO pin configuration
-- Hardware trigger mode
-- HIGH = streaming active
-- LOW = paused/stopped
-- libgpiod integration
+**Planned features:**
 
----
+* GPIO pin configuration for trigger.
+* Hardware trigger mode (HIGH = streaming, LOW = paused).
+* `libgpiod` integration.
 
 ### v1.0 — Full Release (planned)
 
-**Status:** 📋 Not started
-
-**Goals:**
-- All features complete
-- Full test coverage
-- Performance optimization (~14 fps)
-- Documentation complete
-- Production ready
-
----
-
-## Development
-
-### Building from Source
-```bash
-# Install dependencies
-sudo apt install libcamera-dev libgpiod-dev python3-dev
-
-# Setup
-python3 -m venv .venv
-source .venv/bin/activate
-pip install pybind11
-
-# Compile
-./build.sh
-
-# Run tests
-python3 examples/demo_python.py
-```
-
-### Geany IDE Setup
-
-**Build command (F9):**
-```bash
-bash /home/admin/projects/Spider_camera/build.sh
-```
-
-**Execute command (F5):**
-```bash
-cd /home/admin/projects/Spider_camera && source .venv/bin/activate && python3 examples/demo_python.py
-```
+To be defined.
 
 ## Performance
 
-- **Target:** ~14 fps RAW capture
-- **Latency:** Minimal (in-memory transfer)
-- **Format:** 10-bit/12-bit Bayer RAW
-- **Memory:** Zero-copy where possible
+* **Target:** ~14 fps RAW capture at high resolution.
+* **Result (v0.2):** ~13–14 fps at 4608×2592 (12 MP).
+* Latency: minimal; frames are copied in-memory in C++ during capture.
+* Decompression time: ~0.28 s for 13 × 12 MP frames (post-capture, on reference hardware).
+* Format: PISP_COMP1 (8-bit compressed) → 10-bit Bayer RAW.
 
-## Limitations (v0.1)
+## Limitations (current v0.2)
 
-- ❌ RAW format only (no JPEG/H.264)
-- ❌ No single-shot capture mode
-- ❌ No encoding/compression
-- ❌ Memory-only delivery (no disk writes)
-- ✅ Geany-based compilation (no CMake required)
-
-## License
-
-[Specify your license here]
-
-## Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new features
-4. Submit a pull request
+* ❌ No hot parameters: capture settings (ISO, exposure, etc.) are hard-coded in C++.
+* ❌ No GPIO trigger support yet.
+* ❌ RAW format only (no JPEG / H.264 encoding).
+* ❌ No single-shot capture mode.
+* ❌ Frames are delivered only to Python memory (no disk writes in C++ layer).
 
 ## Roadmap
 
-- [x] v0.1 - Basic initialization
-- [x] v0.2 - Frame streaming
-- [ ] v0.3 - Hot parameters
-- [ ] v0.4 - GPIO trigger
-- [ ] v0.5 - Performance optimization
-- [ ] v1.0 - Production release
+* [x] v0.1 — Basic initialization
+* [x] v0.2 — Frame streaming (burst capture)
+* [ ] v0.3 — Hot parameters
+* [ ] v0.4 — GPIO trigger
+* [ ] v0.5 — Performance optimization (CSI2P support)
+* [ ] v1.0 — Production release
+
+## License
+
+
 
 ## Author
 
-[Your name]
+
 
 ## Acknowledgments
 
-- libcamera team for the excellent camera framework
-- pybind11 project for C++/Python bindings
-- Raspberry Pi Foundation
+

@@ -1,9 +1,10 @@
+#!/bin/bash
 # build.sh - Compilation script for SpiderCamera library
 
 set -e  # Exit on error
 
 echo "===================================="
-echo "  SpiderCamera Build Script (v0.1)"
+echo "  SpiderCamera Build Script (v0.2.3)"
 echo "===================================="
 
 # Configuration
@@ -40,6 +41,7 @@ echo ""
 echo "Compiling SpiderCamera..."
 $CXX $CXXFLAGS $INCLUDES \
     src/spider_camera.cpp \
+    src/pisp_decompress.cpp \
     src/frame_buffer.cpp \
     bindings/pybind_spider.cpp \
     $LDFLAGS $LIBS \
