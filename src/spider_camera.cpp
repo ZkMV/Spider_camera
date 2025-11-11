@@ -1,11 +1,9 @@
 /*
  * spider_camera.cpp
  *
- * Implementation file for the SpiderCamera library (v0.3.9.1 - Macro Fix).
- * v0.3.9.1: 1. Re-added the logging macros (LOG_INFO, etc.) that
- * were mistakenly omitted in the previous version.
- * 2. (Fix) Commented out FrameDurationLimits (Control 0x1c).
- * 3. (Fix) Implemented robust single mmap() logic for YUV planes.
+ * Implementation file for the SpiderCamera library (v0.3.16 - Resolution Parameter).
+ * v0.3.16: 1. Implemented set_resolution().
+ * 2. create_capture_config() now uses target_width/height variables.
  */
 
 #include "spider_camera.hpp"
@@ -20,16 +18,14 @@
 #include <iomanip>
 #include <pybind11/stl.h>
 #include <unistd.h>
-#include <cstring> // <--- Додано для std::memcpy
+#include <cstring> 
+#include <sstream> 
 
-// =======================================================
-// 🎯 ВИРІШЕННЯ: Повертаємо макроси логування
-// =======================================================
+// Макроси логування
 #define LOG_INFO(msg)   std::cout << "[INFO]  " << msg << std::endl
 #define LOG_DEBUG(msg)  if (debug_enabled_) std::cout << "[DEBUG] " << msg << std::endl
 #define LOG_WARN(msg)   std::cerr << "[WARN]  " << msg << std::endl
 #define LOG_ERROR(msg)  std::cerr << "[ERROR] " << msg << std::endl
-// =======================================================
 
 
 SpiderCamera::SpiderCamera() : state_(0), active_camera_id_(-1) {
@@ -47,6 +43,7 @@ SpiderCamera::SpiderCamera() : state_(0), active_camera_id_(-1) {
     }
 }
 
+// ... (Деструктор, set_cam, get_cam, release_camera, stop - БЕЗ ЗМІН) ...
 SpiderCamera::~SpiderCamera() {
     LOG_INFO("Shutting down...");
     if (state_ == 2) {
@@ -151,7 +148,11 @@ void SpiderCamera::stop() {
     LOG_INFO("Camera stopped (state 0)");
 }
 
-
+/**
+ * @brief [v0.3.16: ОНОВЛЕНО]
+ * Тепер використовує target_width_ та target_height_
+ * для вибору розміру кадру.
+ */
 std::unique_ptr<libcamera::CameraConfiguration> SpiderCamera::create_capture_config() {
     auto config = camera_->generateConfiguration({libcamera::StreamRole::Viewfinder});
     if (!config) {
@@ -161,6 +162,7 @@ std::unique_ptr<libcamera::CameraConfiguration> SpiderCamera::create_capture_con
     LOG_INFO("Generated base config for stream role 'Viewfinder'");
     const libcamera::StreamFormats &formats = stream_config.formats();
     
+    // ... (Логіка вибору PixelFormat БЕЗ ЗМІН) ...
     if (formats.pixelformats().end() != std::find(formats.pixelformats().begin(), 
                                                   formats.pixelformats().end(), 
                                                   libcamera::formats::YUV420)) {
@@ -184,7 +186,25 @@ std::unique_ptr<libcamera::CameraConfiguration> SpiderCamera::create_capture_con
         throw std::runtime_error("No sizes available for the selected format.");
     }
     
-    libcamera::Size target_size{4056, 3040};
+    // =======================================================
+    // 🎯 v0.3.16: ОНОВЛЕНА ЛОГІКА ВИБОРУ РОЗДІЛЬНОЇ ЗДАТНОСТІ
+    // =======================================================
+    libcamera::Size target_size;
+    std::string target_res_str;
+
+    if (target_width_ == 0 || target_height_ == 0) {
+        // Якщо не встановлено, використовуємо старий жорсткий код (4056x3040)
+        LOG_INFO("No target resolution set via set_resolution(), using default (4056x3040).");
+        target_size = {4056, 3040};
+        target_res_str = "4056x3040";
+    } else {
+        // Використовуємо значення, передані з Python
+        target_size = {target_width_, target_height_};
+        target_res_str = std::to_string(target_width_) + "x" + std::to_string(target_height_);
+        LOG_INFO("Using target resolution from config: " << target_res_str);
+    }
+    // =======================================================
+    
     bool found = false;
     for (const auto& size : sizes) {
         if (size.width == target_size.width && size.height == target_size.height) {
@@ -194,10 +214,13 @@ std::unique_ptr<libcamera::CameraConfiguration> SpiderCamera::create_capture_con
         }
     }
     if (!found) {
-        stream_config.size = sizes.back();
-        LOG_WARN("Target resolution 4056x3040 not available, using: " 
+        // Якщо бажаний розмір не знайдено, використовуємо найбільший доступний
+        stream_config.size = sizes.back(); 
+        LOG_WARN("Target resolution " << target_res_str << " not available for this format.");
+        LOG_WARN("Falling back to largest available: " 
                  << stream_config.size.width << "x" << stream_config.size.height);
     }
+    
     LOG_INFO("Set Resolution to: " << stream_config.size.width << "x" 
              << stream_config.size.height);
 
@@ -302,12 +325,55 @@ void SpiderCamera::be_ready() {
     }
 }
 
+// =======================================================
+// 🎯 v0.3.16: РЕАЛІЗАЦІЯ НОВИХ СЕТТЕРІВ
+// =======================================================
+
+void SpiderCamera::set_exposure(int exposure_us) {
+    if (exposure_us <= 0) {
+        LOG_WARN("Exposure value must be positive. Ignoring.");
+        return;
+    }
+    LOG_INFO("Setting Exposure to " << exposure_us << " us");
+    exposure_us_ = exposure_us;
+}
+
+void SpiderCamera::set_focus(float focus_value) {
+    LOG_INFO("Setting Focus to " << focus_value);
+    focus_value_ = focus_value;
+}
+
+void SpiderCamera::set_iso(int iso) {
+    if (iso <= 0) {
+        LOG_WARN("ISO value must be positive. Ignoring.");
+        return;
+    }
+
+    total_gain_ = iso / BASE_ISO_;
+    
+    LOG_INFO("Setting ISO to " << iso 
+             << " (Calculated Total AnalogueGain: " << total_gain_ << ")");
+}
+
 /**
- * @brief [v0.3.10: ЗМІНЕНО]
- * Імітуємо логіку picamera2: залишаємо AeEnable = true,
- * але примусово "перезаписуємо" її значення, передаючи
- * ExposureTime, AnalogueGain та DigitalGain у тому ж запиті.
- * Це змушує ISP застосувати DigitalGain.
+ * @brief [v0.3.16: НОВА ФУНКЦІЯ]
+ * Зберігає цільову роздільну здатність.
+ */
+void SpiderCamera::set_resolution(int w, int h) {
+    if (w <= 0 || h <= 0) {
+        LOG_WARN("Resolution values must be positive. Ignoring.");
+        return;
+    }
+    LOG_INFO("Setting Target Resolution to " << w << "x" << h);
+    target_width_ = static_cast<uint32_t>(w);
+    target_height_ = static_cast<uint32_t>(h);
+}
+
+
+/**
+ * @brief [v0.3.15: ОНОВЛЕНО]
+ * Повертаємось до AeEnable=false.
+ * Використовуємо *тільки* AnalogueGain.
  */
 void SpiderCamera::go() {
     if (state_ != 1) {
@@ -332,29 +398,48 @@ void SpiderCamera::go() {
         if (ret) {
             throw std::runtime_error("Failed to start camera: " + std::to_string(ret));
         }
+
+        std::stringstream log_msg;
+        log_msg << "Queued " << requests_.size() << " requests: ";
+
         for (auto &request : requests_) {
             libcamera::ControlList &controls = request->controls();
             
             // =======================================================
-            // 🎯 ВИРІШЕННЯ: Ми *вмикаємо* авторежими,
-            // але негайно "перезаписуємо" їх ручними значеннями.
+            // 🎯 v0.3.15: ФІНАЛЬНИЙ ФІКС
+            // =======================================================
             
-            controls.set(libcamera::controls::AeEnable, true);
-            controls.set(libcamera::controls::AwbEnable, true); // Також вмикаємо AWB для стабільності
-
-            // Встановлюємо наші примусові ручні значення:
-            controls.set(libcamera::controls::ExposureTime, 100);
-            controls.set(libcamera::controls::AnalogueGain, 16.0f);
-            controls.set(libcamera::controls::DigitalGain, 2.5f);
+            // 1. Прибираємо помилку "0x0000001c"
+            // int64_t frame_duration[2] = {71428, 71428}; // 14fps
+            // controls.set(libcamera::controls::FrameDurationLimits, frame_duration);
+            
+            // 2. ВИМИКАЄМО "домовика" (AE/AWB)
+            controls.set(libcamera::controls::AeEnable, false);
+            controls.set(libcamera::controls::AwbEnable, false); 
+            
+            // 3. Встановлюємо наші примусові ручні значення
+            controls.set(libcamera::controls::ExposureTime, exposure_us_);
+            controls.set(libcamera::controls::AnalogueGain, total_gain_);
+            controls.set(libcamera::controls::DigitalGain, 1.0f); // Завжди 1.0
+            controls.set(libcamera::controls::LensPosition, focus_value_);
+            
+            // (Логуємо лише для першого запиту)
+            if (request == requests_[0]) {
+                 log_msg << "AE/AWB=FALSE (Manual), "
+                         << "ISO~" << (int)(BASE_ISO_ * total_gain_)
+                         << " (AG: " << total_gain_ << ", DG: 1.0), "
+                         << "Exp: " << exposure_us_ << "us, "
+                         << "Focus: " << focus_value_;
+            }
             // =======================================================
             
             camera_->queueRequest(request.get());
         }
 
-        LOG_INFO("Queued " << requests_.size() << " requests: AE/AWB=ON (Manual Override), ISO 4000 (AG 16.0, DG 2.5), Exp 100us");
+        LOG_INFO(log_msg.str());
         
         streaming_ = true;
-        frame_count_ = 0;
+        frame_count_ = 0; // Скидаємо лічильник для "розігріву"
         error_count_ = 0;
         fps_start_time_ = std::chrono::steady_clock::now();
         stream_thread_ = std::make_unique<std::thread>(&SpiderCamera::stream_loop, this);
@@ -369,6 +454,8 @@ void SpiderCamera::go() {
     }
 }
 
+// ... (pause(), stream_loop(), handle_request_complete() і т.д. - БЕЗ ЗМІН) ...
+// (Важливо: handle_request_complete все ще має містити логіку пропуску 5 кадрів!)
 
 void SpiderCamera::pause() {
     if (state_ != 2) {
@@ -430,11 +517,29 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
     }
 
     libcamera::FrameBuffer *buffer = buffers.begin()->second;
-    frame_count_++;
     
-    LOG_DEBUG("Frame #" << frame_count_ << ": " << frame_width_ << "x" << frame_height_);
+    // =======================================================
+    // 🎯 ЛОГІКА ПРОПУСКУ КАДРІВ (РОЗІГРІВ)
+    // =======================================================
+    frame_count_++; // Спочатку збільшуємо лічильник
+    const int FRAMES_TO_SKIP_FOR_WARMUP = 5;
 
-    // --- TIMESTAMPS (З виправленням .id() та *) ---
+    if (frame_count_ <= FRAMES_TO_SKIP_FOR_WARMUP) {
+        if (frame_count_ == 1) {
+            LOG_INFO("Dropping first " << FRAMES_TO_SKIP_FOR_WARMUP << " frames for sensor warmup...");
+        }
+        LOG_DEBUG("Skipping warm-up frame #" << frame_count_);
+        // Просто повертаємо буфер в чергу і виходимо, не обробляючи
+        request->reuse(libcamera::Request::ReuseBuffers);
+        camera_->queueRequest(request);
+        return;
+    }
+    // =======================================================
+
+    
+    LOG_DEBUG("Processing frame #" << frame_count_ << ": " << frame_width_ << "x" << frame_height_);
+
+    // ... (Timestamp logging, FPS logging - БЕЗ ЗМІН) ...
     const libcamera::ControlList &metadata = request->metadata();
     double timestamp_us = 0.0;
     if (metadata.contains(libcamera::controls::SensorTimestamp.id())) {
@@ -443,7 +548,6 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
         LOG_DEBUG("  Timestamp: " << ts_ns << " ns (" << (timestamp_us / 1000.0) << " ms)");
     }
 
-    // --- FPS logging ---
     if (frame_count_ % 10 == 0) {
         auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -454,8 +558,8 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
         }
         fps_start_time_ = now;
     }
-
-    // --- v0.3.9: YUV420 Robust MMAP Handling ---
+    
+    // ... (Robust MMAP Handling, Plane Copying - БЕЗ ЗМІН) ...
     if (buffer->planes().size() < 3) {
         LOG_ERROR("YUV: Expected 3 planes, but buffer has " << buffer->planes().size());
         request->reuse(libcamera::Request::ReuseBuffers);
@@ -498,7 +602,6 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
         uint8_t *u_dst_ptr = y_dst_ptr + y_size;
         uint8_t *v_dst_ptr = u_dst_ptr + uv_size;
 
-        // --- Y Plane Copy (stripping stride) ---
         if (frame_stride_y_ == frame_width_) {
             std::memcpy(y_dst_ptr, y_src_ptr, y_size);
         } else {
@@ -510,7 +613,6 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
             }
         }
 
-        // --- U Plane Copy (stripping stride) ---
         if (frame_stride_uv_ == uv_width) {
             std::memcpy(u_dst_ptr, u_src_ptr, uv_size);
         } else {
@@ -522,7 +624,6 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
             }
         }
 
-        // --- V Plane Copy (stripping stride) ---
         if (frame_stride_uv_ == uv_width) {
             std::memcpy(v_dst_ptr, v_src_ptr, uv_size);
         } else {
@@ -553,7 +654,7 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
     camera_->queueRequest(request);
 }
 
-
+// ... (get_frame_properties, get_burst_frames - БЕЗ ЗМІН) ...
 py::tuple SpiderCamera::get_frame_properties() {
     py::gil_scoped_acquire acquire_gil;
     if (state_ == 0) {
@@ -609,6 +710,7 @@ py::list SpiderCamera::get_burst_frames() {
     return frame_list;
 }
 
+// ... (get_state, set_frame_callback, enable_debug, convert_to_numpy - БЕЗ ЗМІН) ...
 int SpiderCamera::get_state() const {
     return state_;
 }

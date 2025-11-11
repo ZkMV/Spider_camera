@@ -6,14 +6,12 @@ SpiderCamera is a C++ wrapper around libcamera designed for high-speed RAW frame
 
 ## Features
 
-* 🎥 RAW format streaming (10-bit / 12-bit Bayer)
-* 🐍 Python interface via pybind11
-* 🚀 **~14 fps burst capture performance** at 4608×2592
-* 📈 **PISP_COMP1 8-bit RAW decompression** support
-* 💾 In-memory "burst" frame buffering via `get_burst_frames()`
-* 📋 Hot parameter changes (ISO, exposure, resolution, focus) — **planned for v0.3**
-* 🔌 **Per-frame GPIO hardware trigger** support (for flash/strobe sync) — **planned for v0.4**
-
+* 🎥 **High-speed YUV420 streaming** (for real-time analysis, bypassing slow RAW decompression).
+* 🐍 Python interface via pybind11.
+* 🚀 **~14 fps burst capture performance** at **3840x2400**.
+* 💾 In-memory "burst" frame buffering via `get_burst_frames()`.
+* ✅ **Hot parameter changes** (ISO, exposure, resolution, focus) via Python setters.
+* 🔌 **Per-frame GPIO hardware trigger** support (for flash/strobe sync) — **planned for v0.4**.
 ## Requirements
 
 * Raspberry Pi with libcamera support
@@ -45,38 +43,64 @@ chmod +x build.sh
 python3 examples/demo_python.py
 ```
 
-## Usage Example (v0.2 Burst Capture)
+
+## Usage Example (v0.3 Hot Parameters)
 
 ```python
 import time
 import spider_camera
+import json
 
-# Initialize
+# --- 1. Load Configuration ---
+# (e.g., from examples/demo_config.json)
+with open("examples/demo_config.json", 'r') as f:
+    config = json.load(f)
+
+# --- 2. Initialize & Configure ---
 cam = spider_camera.SpiderCamera()
 cam.set_cam(0)
 
-# Prepare camera (e.g. 4056×3040 @ ~14 fps)
+# Set parameters BEFORE calling be_ready()
+cam.set_iso(config['iso'])
+cam.set_exposure(config['exposure_us'])
+cam.set_focus(config['focus_value'])
+w, h = map(int, config['resolution'].split('x'))
+cam.set_resolution(w, h)
+
+# Prepare camera. This will now use the settings above.
 cam.be_ready()
 
-# Start capturing
+# --- 3. Capture ---
 cam.go()
-
-# Capture for 2 seconds
-time.sleep(2.0)
-
-# Pause capturing (keep camera ready)
+time.sleep(1.0) # Capture for 1 second
 cam.pause()
 
-# Get all captured frames
-# This also performs C++-side decompression
+# --- 4. Retrieve ---
+# Frames are YUV420 format (e.g., 3840x2400)
 frame_list = cam.get_burst_frames()
 print(f"Captured {len(frame_list)} frames.")
 
-# TODO: process/save frames in Python (e.g. via OpenCV)
+# --- 5. Process (see Application Pipeline) ---
+# (User code for OpenCV conversion, saving, or analysis)
 
-# Stop and release resources
+# --- 6. Shutdown ---
 cam.stop()
-```
+
+## Application Pipeline: Super-Resolution & Photometry
+
+The primary goal of this library is to enable advanced surface analysis by combining high-speed burst capture with synchronized lighting.
+
+The intended pipeline consists of two stages:
+
+1.  **Capture Stage (Real-time, ~1 sec):**
+    * The camera captures a high-speed burst (~14 fps) of `YUV 3840x2400` frames while in motion.
+    * (v0.4) A per-frame GPIO trigger fires *exactly* in sync with each frame's exposure, activating external photometric lighting.
+
+2.  **Processing Stage (Offline, ~5-10 sec):**
+    * The captured burst of ~14 frames is passed to Python for analysis.
+    * **Task A (Reference Frame):** A subset of frames (e.g., 4-6) are fed into a **Multi-Frame Super-Resolution (MFSR)** algorithm. The slight (sub-pixel) motion between frames provides the necessary data to reconstruct a single, high-detail reference image (e.g., `~7680x4800`).
+    * **Task B (Photometry):** The full set of synchronized frames is fed into a neural network, which analyzes the precise light reflections (photometry) to detect surface inequalities and defects.
+
 
 ## API Reference
 
@@ -100,14 +124,14 @@ cam.stop()
 * `get_burst_frames() -> list[np.ndarray]` — **(NEW in v0.2.8)** return all buffered frames as a list of NumPy arrays; performs decompression in C++ before passing frames to Python.
 * `set_frame_callback(callback)` — **deprecated in v0.2.8**; not recommended for high-speed capture. Prefer `get_burst_frames()`.
 
-### Hot Parameters (v0.3+, planned)
+### Hot Parameters (v0.3)
 
-*Planned for v0.3 — not yet implemented.*
+*Implementation: These setters store values which are applied during `be_ready()` and `go()`.*
 
-* `set_iso(value)` / `get_iso()` — control sensor gain.
-* `set_exposure(us)` / `get_exposure()` — shutter time in microseconds.
-* `set_resolution(w, h)` / `get_resolution()` — change capture resolution.
-* `set_focus(mm)` / `get_focus()` — lens focus position (in millimetres or device units).
+* `set_iso(iso: int)` — Sets target ISO (e.g., 4000). C++ calculates `AnalogueGain`.
+* `set_exposure(us: int)` — Sets shutter time in microseconds (e.g., 100).
+* `set_resolution(w: int, h: int)` — Sets target resolution (e.g., 3840, 2400).
+* `set_focus(value: float)` — Sets manual focus value (e.g., 0.0 for infinity).
 
 ### GPIO Trigger (v0.4+, planned)
 
@@ -169,15 +193,16 @@ SpiderCamera/
 * Performance: stable ~13–14 fps at 4608×2592 (12 MP) resolution.
 * Hard-coded capture settings in C++ loop (14 fps, ISO 4000, 100 µs exposure).
 
-### v0.3 — Hot Parameters (planned)
+### v0.3 — Hot Parameters (2025-11-11)
 
-**Status:** 📋 Not started
+**Status:** ✅ Complete and tested
 
-**Planned features:**
-
-* Implement Python setters (`set_iso`, `set_exposure`, etc.).
-* Pass parameters from Python to C++ controls inside the `go()` loop.
-* Allow changing parameters "live" while in `pause()` state.
+**Features:**
+* Implemented Python setters: `set_iso`, `set_exposure`, `set_focus`, `set_resolution`.
+* Parameters are now passed from Python (e.g., read from a JSON config) to C++.
+* Refactored `go()` to use these variables instead of hard-coded values.
+* Corrected gain logic: now uses `AeEnable=false` with full `AnalogueGain` (e.g., 40.0) and `DigitalGain=1.0`, successfully "exorcising" the auto-exposure "poltergeist".
+* Confirmed stable manual exposure at `100us` (verified with/without external light).
 
 ### v0.4 — GPIO Trigger (planned)
 
@@ -201,19 +226,16 @@ To be defined.
 * Decompression time: ~0.28 s for 13 × 12 MP frames (post-capture, on reference hardware).
 * Format: PISP_COMP1 (8-bit compressed) → 10-bit Bayer RAW.
 
-## Limitations (current v0.2)
+## Limitations (current v0.3)
 
-* ❌ No hot parameters: capture settings (ISO, exposure, etc.) are hard-coded in C++.
-* ❌ No GPIO trigger support yet.
-* ❌ RAW format only (no JPEG / H.264 encoding).
-* ❌ No single-shot capture mode.
-* ❌ Frames are delivered only to Python memory (no disk writes in C++ layer).
+* ❌ No GPIO trigger support yet (this is v0.4).
+* ❌ Getters (`get_iso`, etc.) are still stubs.
 
 ## Roadmap
 
 * [x] v0.1 — Basic initialization
 * [x] v0.2 — Frame streaming (burst capture)
-* [ ] v0.3 — Hot parameters
+* [x] v0.3 — Hot parameters
 * [ ] v0.4 — GPIO trigger
 * [ ] v0.5 — Performance optimization (CSI2P support)
 * [ ] v1.0 — Production release

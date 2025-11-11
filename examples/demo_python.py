@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
-demo_python.py - v0.3.9 (Burst Test)
+demo_python.py - v0.3.11 (Hot Parameters Test)
 
 Tests the full burst capture pipeline.
 - Captures for a set duration.
 - Saves all frames to a specified directory.
+- 🎯 Reads ISO, Exposure, and Focus from demo_config.json
 """
+
+'''
+sizes = ["640x480", "800x600", "1280x720", "1920x1080", "2028x1520", "2304x1296", "2592x1944", "3072x2304", "3840x2400"] - 4056x3040 фізично не можливо
+'''
 
 import sys
 import os
 import time
 import cv2
 import numpy as np
+import json # 🎯 1. ДОДАЄМО ІМПОРТ JSON
 
 if 'spider_camera' in sys.modules:
     del sys.modules['spider_camera']
@@ -35,24 +41,36 @@ except ImportError as e:
 # Тривалість захоплення в секундах
 CAPTURE_DURATION_SEC = 2.0 
 
-# 🎯 ВИПРАВЛЕНО: Шлях для збереження кадрів
+# 🎯 Шлях до файлу конфігурації
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "demo_config.json")
+
+# Шлях для збереження кадрів
 SAVE_PATH = os.path.join(project_root, "temp") # Зберігаємо в папку /temp всередині проєкту
 
 # ============================================
 
 def main():
-    print(f"=== SpiderCamera Burst Test (v0.3.9) ===\n")
+    print(f"=== SpiderCamera Burst Test (v0.3.11) ===\n")
     print(f"Capture Duration: {CAPTURE_DURATION_SEC:.1f} seconds")
     print(f"Will save images to: {SAVE_PATH}")
+
+    # 🎯 2. ЧИТАЄМО ФАЙЛ КОНФІГУРАЦІЇ
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            config = json.load(f)
+        print(f"✓ Loaded config from {CONFIG_FILE}:")
+        print(f"  ISO: {config['iso']}")
+        print(f"  Exposure: {config['exposure_us']} us")
+        print(f"  Focus: {config['focus_value']}")
+    except Exception as e:
+        print(f"❌ Error loading {CONFIG_FILE}: {e}")
+        print("  Please ensure 'demo_config.json' exists in the 'examples' directory.")
+        sys.exit(1)
     
     # Створюємо папку для збереження одразу
     try:
         os.makedirs(SAVE_PATH, exist_ok=True)
-        print(f"✓ Created output directory: {SAVE_PATH}")
-    except PermissionError:
-        print(f"❌ PERMISSION ERROR: Cannot create directory {SAVE_PATH}.")
-        print(f"  Please check permissions or choose a different path (e.g., in your home dir).")
-        sys.exit(1)
+        print(f"✓ Ensured output directory exists: {SAVE_PATH}")
     except Exception as e:
         print(f"❌ Error creating directory: {e}")
         sys.exit(1)
@@ -66,6 +84,12 @@ def main():
         cam.enable_debug(True) 
         
         cam.set_cam(0)
+
+        # 🎯 3. ПЕРЕДАЄМО НАЛАШТУВАННЯ В C++
+        # (Робимо це ПЕРЕД be_ready/go)
+        cam.set_iso(config['iso'])
+        cam.set_exposure(config['exposure_us'])
+        cam.set_focus(config['focus_value'])
         
         print("\nStarting camera (be_ready)...")
         cam.be_ready() 
