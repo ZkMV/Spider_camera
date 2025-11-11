@@ -1,7 +1,8 @@
 /*
  * spider_camera.hpp
  *
- * Header file for the SpiderCamera library (v0.3.7 - Stride Fix).
+ * Header file for the SpiderCamera library (v0.3.16 - Resolution Parameter).
+ * v0.3.16: Added target_width_ / target_height_ member variables.
  */
 
 #ifndef SPIDER_CAMERA_HPP
@@ -34,34 +35,35 @@ public:
     SpiderCamera();
     ~SpiderCamera();
 
+    // --- Core Methods ---
     void set_cam(int cam_id);
     int get_cam() const;
     void be_ready();
     void stop();
     int get_state() const;
 
+    // --- Streaming Methods ---
     void go();
     void pause();
     py::list get_burst_frames();
     void set_frame_callback(std::function<void(py::array, double)> callback);
     void enable_debug(bool enable);
-
-    // --- v0.3.7: Нова функція для Python ---
-    /**
-     * @brief Gets the configured stream properties.
-     * @return tuple (width, height, pixel_format_str)
-     */
     py::tuple get_frame_properties();
 
-    // --- Stubs ---
-    void set_iso(int iso) { /* Not implemented yet */ }
-    int get_iso() const { return 0; }
-    void set_exposure(int exposure_us) { /* Not implemented yet */ }
+    // =======================================================
+    // 🎯 v0.3: ОНОВЛЕНІ ПУБЛІЧНІ ФУНКЦІЇ (СЕТТЕРИ)
+    // =======================================================
+    void set_iso(int iso);
+    void set_exposure(int exposure_us);
+    void set_focus(float focus_value);
+    void set_resolution(int w, int h); // <--- Реалізуємо цю заглушку
+    
+    // --- Stubs (Getters) ---
+    int get_iso() const { return 0; } 
     int get_exposure() const { return 0; }
-    void set_resolution(int w, int h) { /* Not implemented yet */ }
-    py::tuple get_resolution() const { return py::make_tuple(0, 0); }
-    void set_focus(int focus) { /* Not implemented yet */ }
-    int get_focus() const { return 0; }
+    float get_focus() const { return 0.0f; }
+    py::tuple get_resolution() const { return py::make_tuple(0, 0); } // (Поки заглушка)
+
 
 private:
     std::unique_ptr<libcamera::CameraConfiguration> create_capture_config();
@@ -93,15 +95,27 @@ private:
     std::atomic<uint64_t> frame_count_{0};
     std::chrono::steady_clock::time_point fps_start_time_;
     
-    // --- v0.3.7: Змінні для Stride ---
     uint32_t frame_width_ = 0;
     uint32_t frame_height_ = 0;
-    uint32_t frame_stride_y_ = 0;  // Stride для Y-площини
-    uint32_t frame_stride_uv_ = 0; // Stride для U/V площин
+    uint32_t frame_stride_y_ = 0;
+    uint32_t frame_stride_uv_ = 0;
     libcamera::PixelFormat current_pixel_format_;
 
     std::vector<std::vector<uint8_t>> frame_data_buffer_;
     std::mutex frame_buffer_mutex_;
+    
+    // =======================================================
+    // 🎯 v0.3.16: ОНОВЛЕНІ ЗМІННІ НАЛАШТУВАНЬ
+    // =======================================================
+    int exposure_us_ = 100;
+    float focus_value_ = 0.0f;
+    float total_gain_ = 40.0f;
+    
+    // Нові змінні для роздільної здатності
+    uint32_t target_width_ = 0;
+    uint32_t target_height_ = 0;
+
+    const float BASE_ISO_ = 100.0f; 
 };
 
 #endif // SPIDER_CAMERA_HPP
