@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-demo_python.py - v0.2.14 (Burst Capture + JPEG Save Fix)
+demo_python.py - v0.3.9 (Burst Test)
 
-Fixes save path to be relative to the project root.
+Tests the full burst capture pipeline.
+- Captures for a set duration.
+- Saves all frames to a specified directory.
 """
 
 import sys
@@ -11,49 +13,88 @@ import time
 import cv2
 import numpy as np
 
-# Clear module cache
 if 'spider_camera' in sys.modules:
     del sys.modules['spider_camera']
 
+# Визначаємо корінь проєкту, щоб додати його до шляху Python
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(project_root)
+if project_root not in sys.path:
+    sys.path.append(project_root)
 
 try:
     import spider_camera
 except ImportError as e:
     print(f"Error importing spider_camera: {e}")
+    print(f"Project root (added to path): {project_root}")
     sys.exit(1)
 
-# Configuration
+# ============================================
+# НАЛАШТУВАННЯ
+# ============================================
+
+# Тривалість захоплення в секундах
 CAPTURE_DURATION_SEC = 2.0 
-# === v0.2.14: FIX: Створюємо 'temp' всередині папки проєкту ===
-SAVE_PATH = os.path.join(project_root, "temp")
-# ========================================================
-g_frame_count = 0
+
+# 🎯 ВИПРАВЛЕНО: Шлях для збереження кадрів
+SAVE_PATH = os.path.join(project_root, "temp") # Зберігаємо в папку /temp всередині проєкту
+
+# ============================================
 
 def main():
-    print(f"=== SpiderCamera Burst Test (v0.2.14) ===\n")
-    print(f"Will save images to: {SAVE_PATH}") # <-- Додатковий лог
+    print(f"=== SpiderCamera Burst Test (v0.3.9) ===\n")
+    print(f"Capture Duration: {CAPTURE_DURATION_SEC:.1f} seconds")
+    print(f"Will save images to: {SAVE_PATH}")
+    
+    # Створюємо папку для збереження одразу
+    try:
+        os.makedirs(SAVE_PATH, exist_ok=True)
+        print(f"✓ Created output directory: {SAVE_PATH}")
+    except PermissionError:
+        print(f"❌ PERMISSION ERROR: Cannot create directory {SAVE_PATH}.")
+        print(f"  Please check permissions or choose a different path (e.g., in your home dir).")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error creating directory: {e}")
+        sys.exit(1)
+
     
     cam = None
-    bayer_pattern_code = None
-
     try:
         cam = spider_camera.SpiderCamera()
+        
+        # Вмикаємо debug-логі, щоб бачити пропуск кадрів
         cam.enable_debug(True) 
+        
         cam.set_cam(0)
         
-        print("Starting camera...")
+        print("\nStarting camera (be_ready)...")
         cam.be_ready() 
         print(f"State: {cam.get_state()} (Ready)\n")
         
-        # Визначаємо код дебаєризації (з попередніх логів це BGGR)
-        bayer_pattern_code = cv2.COLOR_BAYER_BG2RGB
-
-        print(f"Capturing burst for {CAPTURE_DURATION_SEC:.1f} seconds...")
+        # Отримуємо властивості кадру
+        width, height, pixel_format_str = cam.get_frame_properties()
+        print(f"Got Frame Properties: {width}x{height}, Format: {pixel_format_str}\n")
+        
+        # Визначаємо формат для OpenCV
+        if pixel_format_str == "YUV420":
+            yuv_height = int(height * 1.5)
+            color_cvt_code = cv2.COLOR_YUV2BGR_I420
+            print("✓ Using I420 (Planar) decoder.")
+            expected_size = width * yuv_height
+        elif pixel_format_str == "NV12":
+            yuv_height = int(height * 1.5)
+            color_cvt_code = cv2.COLOR_YUV2BGR_NV12
+            print("✓ Using NV12 (Semi-Planar) decoder.")
+            expected_size = width * yuv_height
+        else:
+            print(f"❌ Unknown format: {pixel_format_str}. Cannot save frames.")
+            color_cvt_code = None
+            expected_size = 0
+            
+        print(f"\nCapturing burst for {CAPTURE_DURATION_SEC:.1f} seconds...")
         
         cam.go()
-        print(f"State: {cam.get_state()} (Streaming)\n")
+        print(f"State: {cam.get_state()} (Streaming)")
         
         start_time = time.time()
         time.sleep(CAPTURE_DURATION_SEC)
@@ -62,57 +103,71 @@ def main():
         cam.pause()
         end_time = time.time()
         
-        print("Capture complete. Decompressing frames...")
-        start_decomp = time.time()
-        
+        print("Retrieving frame data from C++...")
+        start_copy = time.time()
         frame_list = cam.get_burst_frames()
-        
-        end_decomp = time.time()
+        end_copy = time.time()
         
         total_time = end_time - start_time
-        g_frame_count = len(frame_list)
-        fps = g_frame_count / total_time if total_time > 0 else 0
+        frame_count = len(frame_list)
+        fps = frame_count / total_time if total_time > 0 else 0
         
-        # --- ЕТАП ЗБЕРЕЖЕННЯ КАДРІВ ---
-        if frame_list:
+        print(f"\n=== Capture Results ===")
+        print(f"Frames Captured: {frame_count}")
+        print(f"Actual Capture Time: {total_time:.2f}s")
+        print(f"C++ to Python Copy Time: {end_copy - start_copy:.3f}s")
+        print(f"**Average Capture FPS: {fps:.2f}**")
+        
+        # Очікувана кількість кадрів = (Час - Час_розігріву) * FPS
+        # (час розігріву ~5 кадрів / 14 FPS = ~0.35s)
+        expected_frames = (total_time - 0.35) * 14 
+        print(f"(Expected ~{expected_frames:.0f} frames)")
+        
+        
+        # Збереження кадрів
+        if frame_list and color_cvt_code is not None:
             print(f"\nSaving {len(frame_list)} frames to {SAVE_PATH}...")
-            
-            # Цей виклик тепер спрацює, оскільки він у вашій домашній директорії
-            os.makedirs(SAVE_PATH, exist_ok=True) 
             
             save_start_time = time.time()
             
-            for i, bayer_frame in enumerate(frame_list):
-                # 1. Конвертуємо 10-бітний (0-1023) в 8-бітний (0-255)
-                bayer_8bit = (bayer_frame >> 2).astype('uint8')
+            for i, flat_frame in enumerate(frame_list):
+                try:
+                    # Перевірка розміру
+                    if flat_frame.size != expected_size:
+                        print(f"⚠️  Frame {i+1}: size mismatch! Got {flat_frame.size}, expected {expected_size}")
+                        continue
+                    
+                    # Reshape YUV data
+                    yuv_image = flat_frame.reshape((yuv_height, width))
+                    
+                    # Convert YUV → BGR
+                    bgr_image = cv2.cvtColor(yuv_image, color_cvt_code)
+                    
+                    # Save
+                    filename = f"frame_{i + 1:03d}.jpg"
+                    filepath = os.path.join(SAVE_PATH, filename)
+                    cv2.imwrite(filepath, bgr_image)
+                    
+                    if i == 0:
+                        print(f"✓ First frame saved: {filepath}")
+                        print(f"  YUV shape: {yuv_image.shape}, dtype: {yuv_image.dtype}")
+                        print(f"  BGR shape: {bgr_image.shape}, range: [{bgr_image.min()}, {bgr_image.max()}]")
                 
-                # 2. Дебаєризація
-                rgb_image = cv2.cvtColor(bayer_8bit, bayer_pattern_code)
-                
-                # 3. Створюємо ім'я файлу (01.jpg, 02.jpg, ...)
-                filename = f"{i + 1:02d}.jpg"
-                filepath = os.path.join(SAVE_PATH, filename)
-                
-                # 4. Зберігаємо JPEG
-                cv2.imwrite(filepath, rgb_image)
+                except Exception as e:
+                    print(f"❌ Error saving frame {i+1}: {e}")
 
             save_end_time = time.time()
-            print(f"Successfully saved frames in {save_end_time - save_start_time:.2f}s")
-        # ------------------------------------
-
-        print(f"\n=== Results ===")
-        print(f"Frames Captured: {g_frame_count}")
-        print(f"Capture Time: {total_time:.2f}s")
-        print(f"Decompression Time: {end_decomp - start_decomp:.2f}s")
-        print(f"**Actual Average FPS: {fps:.2f}**")
-
-        if frame_list:
-            print(f"First frame shape: {frame_list[0].shape} (dtype: {frame_list[0].dtype})")
+            print(f"\n✓ Processed and saved {len(frame_list)} frames in {save_end_time - save_start_time:.2f}s")
+        
+        elif not frame_list:
+            print("❌ No frames were captured!")
+        else:
+            print("❌ Cannot save frames (unknown format)")
         
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        print("\n⚠️  Interrupted by user")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
     finally:
@@ -123,7 +178,7 @@ def main():
                 cam.stop()
             except Exception as e:
                 print(f"Error during shutdown: {e}")
-        print("\nTest complete")
+        print("\nTest complete.")
 
 if __name__ == "__main__":
     main()

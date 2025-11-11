@@ -12,7 +12,7 @@ SpiderCamera is a C++ wrapper around libcamera designed for high-speed RAW frame
 * 📈 **PISP_COMP1 8-bit RAW decompression** support
 * 💾 In-memory "burst" frame buffering via `get_burst_frames()`
 * 📋 Hot parameter changes (ISO, exposure, resolution, focus) — **planned for v0.3**
-* 🔌 GPIO hardware trigger support — **planned for v0.4**
+* 🔌 **Per-frame GPIO hardware trigger** support (for flash/strobe sync) — **planned for v0.4**
 
 ## Requirements
 
@@ -111,13 +111,17 @@ cam.stop()
 
 ### GPIO Trigger (v0.4+, planned)
 
-*Planned for v0.4 — not yet implemented.*
+**Status:** 📋 Not started
 
-* `set_spider_gpio(pin)` / `get_spider_gpio()` — configure GPIO pin used for SpiderCamera trigger.
-* `set_spider_trigger(enabled: bool)` / `get_spider_trigger()` — hardware trigger mode:
+**Planned features:**
 
-  * HIGH = streaming
-  * LOW  = paused
+* `set_frame_trigger_pin(pin)` / `get_frame_trigger_pin()` — configure GPIO pin for per-frame trigger.
+* `enable_frame_trigger(enabled: bool)` / `get_frame_trigger()` — enable/disable the per-frame trigger.
+* **Trigger Logic:** When enabled, the specified GPIO pin will be pulsed (HIGH/LOW) for each individual frame captured.
+* **Use Case:** This allows for precise, microsecond-level synchronization of external lighting (strobes, flashes) with the camera's sensor exposure.
+* **Implementation:** This will be achieved by connecting to `libcamera`'s internal signals:
+  * `requestIssued` signal → Set GPIO **HIGH** (just before exposure starts)
+  * `requestCompleted` signal → Set GPIO **LOW** (just after frame is captured)
 
 ## Project Structure
 

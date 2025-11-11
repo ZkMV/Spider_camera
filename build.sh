@@ -1,10 +1,10 @@
 #!/bin/bash
-# build.sh - Compilation script for SpiderCamera library
+# build.sh - Compilation script for SpiderCamera library (v0.3.0)
 
 set -e  # Exit on error
 
 echo "===================================="
-echo "  SpiderCamera Build Script (v0.2.3)"
+echo "  SpiderCamera Build Script (v0.3.0)"
 echo "===================================="
 
 # Configuration
@@ -22,9 +22,9 @@ fi
 
 # Compiler flags
 CXX="g++"
-CXXFLAGS="-std=c++17 -fPIC -O2 -Wall -Wextra"
+CXXFLAGS="-std=c++17 -fPIC -O2 -Wall -Wextra -Wno-unused-parameter"
 LIBCAMERA_CFLAGS="$(pkg-config --cflags libcamera)"
-INCLUDES="-I./include -I$PYBIND_INCLUDE -I$PYTHON_INCLUDE $LIBCAMERA_CFLAGS -I/usr/include/libcamera"
+INCLUDES="-I./include -I$PYBIND_INCLUDE -I$PYTHON_INCLUDE $LIBCAMERA_CFLAGS"
 LIBCAMERA_LIBS="$(pkg-config --libs libcamera)"
 LIBS="$LIBCAMERA_LIBS -lpthread"
 LDFLAGS="-shared"
@@ -41,11 +41,11 @@ echo ""
 echo "Compiling SpiderCamera..."
 $CXX $CXXFLAGS $INCLUDES \
     src/spider_camera.cpp \
-    src/pisp_decompress.cpp \
-    src/frame_buffer.cpp \
     bindings/pybind_spider.cpp \
     $LDFLAGS $LIBS \
     -o $OUTPUT
+
+# v0.3.0: Видалено src/pisp_decompress.cpp та src/frame_buffer.cpp
 
 if [ $? -eq 0 ]; then
     echo ""
