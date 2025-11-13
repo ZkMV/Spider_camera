@@ -2,7 +2,7 @@
  * pybind_spider.cpp
  *
  * Pybind11 wrapper definitions for the SpiderCamera library.
- * v0.3.11: Updated bindings for implemented Hot Parameters.
+ * v0.4.1: Added bindings for GPIO trigger functions.
  */
 
 #include "spider_camera.hpp"
@@ -13,7 +13,7 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(spider_camera, m) {
-    m.doc() = "SpiderCamera: A C++ libcamera wrapper for high-speed capture (v0.3.11 YUV)";
+    m.doc() = "SpiderCamera: A C++ libcamera wrapper for high-speed capture (v0.4.1 YUV+GPIO)";
 
     py::class_<SpiderCamera>(m, "SpiderCamera")
         .def(py::init<>(), "Initializes the camera manager")
@@ -34,9 +34,7 @@ PYBIND11_MODULE(spider_camera, m) {
         .def("get_frame_properties", &SpiderCamera::get_frame_properties,
              "Returns (width, height, format_string) of the stream")
 
-        // =======================================================
-        // 🎯 v0.3: ОНОВЛЕНІ БІНДИНГИ
-        // =======================================================
+        // --- v0.3: Hot Parameters ---
         .def("set_iso", &SpiderCamera::set_iso, 
              py::arg("iso"), "Sets the target ISO value")
         .def("get_iso", &SpiderCamera::get_iso, "Get current ISO value (stub)")
@@ -49,7 +47,14 @@ PYBIND11_MODULE(spider_camera, m) {
              py::arg("focus_value"), "Sets the manual focus value (0.0 = infinity)")
         .def("get_focus", &SpiderCamera::get_focus, "Get current focus value (stub)")
 
-        // --- Stubs ---
-        .def("set_resolution", &SpiderCamera::set_resolution, py::arg("width"), py::arg("height"), "Set frame resolution (stub)")
-        .def("get_resolution", &SpiderCamera::get_resolution, "Get current frame resolution (stub)");
+        .def("set_resolution", &SpiderCamera::set_resolution, py::arg("width"), py::arg("height"), "Set frame resolution")
+        .def("get_resolution", &SpiderCamera::get_resolution, "Get current frame resolution (stub)")
+        
+        // =======================================================
+        // 🎯 v0.4: БІНДИНГИ GPIO
+        // =======================================================
+        .def("set_frame_trigger_pin", &SpiderCamera::set_frame_trigger_pin,
+             py::arg("pin_num"), "Configures GPIO pin for output (must be called before be_ready)")
+        .def("enable_frame_trigger", &SpiderCamera::enable_frame_trigger,
+             py::arg("enable"), "Enable or disable per-frame GPIO trigger");
 }

@@ -11,7 +11,7 @@ SpiderCamera is a C++ wrapper around libcamera designed for high-speed RAW frame
 * 🚀 **~14 fps burst capture performance** at **3840x2400**.
 * 💾 In-memory "burst" frame buffering via `get_burst_frames()`.
 * ✅ **Hot parameter changes** (ISO, exposure, resolution, focus) via Python setters.
-* 🔌 **Per-frame GPIO hardware trigger** support (for flash/strobe sync) — **planned for v0.4**.
+* ✅ **Per-frame GPIO hardware trigger** support (for flash/strobe sync)..
 ## Requirements
 
 * Raspberry Pi with libcamera support
@@ -107,7 +107,7 @@ The intended pipeline consists of two stages:
 
 1.  **Capture Stage (Real-time, ~1 sec):**
     * The camera captures a high-speed burst (~14 fps) of `YUV 3840x2400` frames while in motion.
-    * (v0.4) A per-frame GPIO trigger fires *exactly* in sync with each frame's exposure, activating external photometric lighting.
+    * A per-frame GPIO trigger fires *exactly* in sync with each frame's exposure, activating external photometric lighting.
 
 2.  **Processing Stage (Offline, ~5-10 sec):**
     * The captured burst of ~14 frames is passed to Python for analysis.
@@ -132,7 +132,7 @@ The intended pipeline consists of two stages:
 
 ### Streaming Methods (v0.2+)
 
-* `go()` — start RAW frame capture (state: `1 → 2`).
+* `go()` — start YUV frame capture (state: `1 → 2`).
 * `pause()` — pause streaming, keep camera configured (state: `2 → 1`).
 * `get_burst_frames() -> list[np.ndarray]` — **(NEW in v0.2.8)** return all buffered frames as a list of NumPy arrays; performs decompression in C++ before passing frames to Python.
 * `set_frame_callback(callback)` — **deprecated in v0.2.8**; not recommended for high-speed capture. Prefer `get_burst_frames()`.
@@ -146,19 +146,17 @@ The intended pipeline consists of two stages:
 * `set_resolution(w: int, h: int)` — Sets target resolution (e.g., 3840, 2400).
 * `set_focus(value: float)` — Sets manual focus value (e.g., 0.0 for infinity).
 
-### GPIO Trigger (v0.4+, planned)
+### GPIO Trigger (v0.4)
 
-**Status:** 📋 Not started
+**Status:** ✅ Complete and tested
 
-**Planned features:**
-
-* `set_frame_trigger_pin(pin)` / `get_frame_trigger_pin()` — configure GPIO pin for per-frame trigger.
-* `enable_frame_trigger(enabled: bool)` / `get_frame_trigger()` — enable/disable the per-frame trigger.
-* **Trigger Logic:** When enabled, the specified GPIO pin will be pulsed (HIGH/LOW) for each individual frame captured.
-* **Use Case:** This allows for precise, microsecond-level synchronization of external lighting (strobes, flashes) with the camera's sensor exposure.
-* **Implementation:** This will be achieved by connecting to `libcamera`'s internal signals:
-  * `requestIssued` signal → Set GPIO **HIGH** (just before exposure starts)
-  * `requestCompleted` signal → Set GPIO **LOW** (just after frame is captured)
+**Features:**
+* `set_frame_trigger_pin(pin: int)`: Configures the BCM GPIO pin for output (e.g., pin 21 on `gpiochip4` for RPi 5).
+* `enable_frame_trigger(enabled: bool)`: Enables/disables the trigger logic.
+* **Trigger Logic:** Generates a precise HIGH/LOW pulse for each frame.
+    * **GPIO LOW:** Встановлюється на *початку* `handle_request_complete` (кінець експозиції кадру N).
+    * **GPIO HIGH:** Встановлюється в *кінці* `handle_request_complete` (безпосередньо перед постановкою в чергу кадру N+1).
+* **Implementation:** Uses the stable C-API (`gpiod.h`) for `libgpiod` to ensure compatibility and avoid "undefined symbol" linking errors.
 
 ## Project Structure
 
@@ -238,9 +236,8 @@ To be defined.
 * Decompression time: ~0.28 s for 13 × 12 MP frames (post-capture, on reference hardware).
 * Format: PISP_COMP1 (8-bit compressed) → 10-bit Bayer RAW.
 
-## Limitations (current v0.3)
+## Limitations (current v0.4)
 
-* ❌ No GPIO trigger support yet (this is v0.4).
 * ❌ Getters (`get_iso`, etc.) are still stubs.
 
 ## Roadmap
@@ -248,7 +245,7 @@ To be defined.
 * [x] v0.1 — Basic initialization
 * [x] v0.2 — Frame streaming (burst capture)
 * [x] v0.3 — Hot parameters
-* [ ] v0.4 — GPIO trigger
+* [x] v0.4 — GPIO trigger
 * [ ] v0.5 — Performance optimization (CSI2P support)
 * [ ] v1.0 — Production release
 

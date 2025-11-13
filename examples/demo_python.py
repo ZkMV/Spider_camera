@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-demo_python.py - v0.3.11 (Hot Parameters Test)
+demo_python.py - v0.4.0 (GPIO Test)
 
-Tests the full burst capture pipeline.
-- Captures for a set duration.
-- Saves all frames to a specified directory.
-- 🎯 Reads ISO, Exposure, and Focus from demo_config.json
+- Reads configuration from demo_config.json
+- Passes ISO, Exposure, Focus, and Resolution to C++ library
+- 🎯 Activates GPIO trigger on BCM pin 21
 """
 
 '''
@@ -17,7 +16,7 @@ import os
 import time
 import cv2
 import numpy as np
-import json # 🎯 1. ДОДАЄМО ІМПОРТ JSON
+import json 
 
 if 'spider_camera' in sys.modules:
     del sys.modules['spider_camera']
@@ -50,11 +49,11 @@ SAVE_PATH = os.path.join(project_root, "temp") # Зберігаємо в пап�
 # ============================================
 
 def main():
-    print(f"=== SpiderCamera Burst Test (v0.3.11) ===\n")
+    print(f"=== SpiderCamera Burst Test (v0.4.0) ===\n")
     print(f"Capture Duration: {CAPTURE_DURATION_SEC:.1f} seconds")
     print(f"Will save images to: {SAVE_PATH}")
 
-    # 🎯 2. ЧИТАЄМО ФАЙЛ КОНФІГУРАЦІЇ
+    # 🎯 1. ЧИТАЄМО ФАЙЛ КОНФІГУРАЦІЇ
     try:
         with open(CONFIG_FILE, 'r') as f:
             config = json.load(f)
@@ -62,6 +61,8 @@ def main():
         print(f"  ISO: {config['iso']}")
         print(f"  Exposure: {config['exposure_us']} us")
         print(f"  Focus: {config['focus_value']}")
+        # 🎯 v0.3.16: Додано роздільну здатність
+        print(f"  Resolution: {config['resolution']}") 
     except Exception as e:
         print(f"❌ Error loading {CONFIG_FILE}: {e}")
         print("  Please ensure 'demo_config.json' exists in the 'examples' directory.")
@@ -85,11 +86,35 @@ def main():
         
         cam.set_cam(0)
 
-        # 🎯 3. ПЕРЕДАЄМО НАЛАШТУВАННЯ В C++
+        # 🎯 2. ПЕРЕДАЄМО НАЛАШТУВАННЯ В C++
         # (Робимо це ПЕРЕД be_ready/go)
         cam.set_iso(config['iso'])
         cam.set_exposure(config['exposure_us'])
         cam.set_focus(config['focus_value'])
+        
+        # 🎯 v0.3.16: РОЗБИРАЄМО РЯДОК РОЗДІЛЬНОЇ ЗДАТНОСТІ
+        try:
+            w_str, h_str = config['resolution'].split('x')
+            w = int(w_str)
+            h = int(h_str)
+            cam.set_resolution(w, h)
+        except Exception as e:
+            print(f"⚠️  Invalid resolution format '{config['resolution']}'. Using C++ default.")
+            print(f"   (Error: {e})")
+
+        # ============================================
+        # 🎯 v0.4: АКТИВАЦІЯ GPIO
+        # ============================================
+        TRIGGER_PIN = 21 # Використовуємо BCM пін 21
+        try:
+            cam.set_frame_trigger_pin(TRIGGER_PIN)
+            cam.enable_frame_trigger(True)
+            print(f"✓ GPIO trigger enabled on BCM pin {TRIGGER_PIN}")
+        except Exception as e:
+            print(f"❌ FAILED TO SET GPIO PIN {TRIGGER_PIN}: {e}")
+            print("  Make sure libgpiod is installed and user has permissions.")
+            sys.exit(1)
+        # ============================================
         
         print("\nStarting camera (be_ready)...")
         cam.be_ready() 

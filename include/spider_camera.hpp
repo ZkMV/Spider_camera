@@ -1,8 +1,9 @@
 /*
  * spider_camera.hpp
  *
- * Header file for the SpiderCamera library (v0.3.16 - Resolution Parameter).
- * v0.3.16: Added target_width_ / target_height_ member variables.
+ * Header file for the SpiderCamera library (v0.4.3 - C-API GPIO Fix).
+ * v0.4.3: Switched from gpiod.hpp (C++ wrapper) to gpiod.h (C API)
+ * to fix "undefined symbol" linking errors.
  */
 
 #ifndef SPIDER_CAMERA_HPP
@@ -18,6 +19,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/functional.h>
 #include <pybind11/numpy.h>
+
+// 🎯 v0.4.3: ПЕРЕМИКАЄМОСЬ НА C API
+#include <gpiod.h>
 
 #include <memory>
 #include <functional>
@@ -50,19 +54,21 @@ public:
     void enable_debug(bool enable);
     py::tuple get_frame_properties();
 
-    // =======================================================
-    // 🎯 v0.3: ОНОВЛЕНІ ПУБЛІЧНІ ФУНКЦІЇ (СЕТТЕРИ)
-    // =======================================================
+    // --- v0.3: Hot Parameters ---
     void set_iso(int iso);
     void set_exposure(int exposure_us);
     void set_focus(float focus_value);
-    void set_resolution(int w, int h); // <--- Реалізуємо цю заглушку
+    void set_resolution(int w, int h);
     
     // --- Stubs (Getters) ---
     int get_iso() const { return 0; } 
     int get_exposure() const { return 0; }
     float get_focus() const { return 0.0f; }
-    py::tuple get_resolution() const { return py::make_tuple(0, 0); } // (Поки заглушка)
+    py::tuple get_resolution() const { return py::make_tuple(0, 0); }
+    
+    // --- v0.4: GPIO Functions ---
+    void set_frame_trigger_pin(int pin_num);
+    void enable_frame_trigger(bool enable);
 
 
 private:
@@ -104,18 +110,21 @@ private:
     std::vector<std::vector<uint8_t>> frame_data_buffer_;
     std::mutex frame_buffer_mutex_;
     
-    // =======================================================
-    // 🎯 v0.3.16: ОНОВЛЕНІ ЗМІННІ НАЛАШТУВАНЬ
-    // =======================================================
+    // --- v0.3 Variables ---
     int exposure_us_ = 100;
     float focus_value_ = 0.0f;
     float total_gain_ = 40.0f;
-    
-    // Нові змінні для роздільної здатності
     uint32_t target_width_ = 0;
     uint32_t target_height_ = 0;
-
     const float BASE_ISO_ = 100.0f; 
+    
+    // =======================================================
+    // 🎯 v0.4.3: ЗМІНЮЄМО ТИПИ ЗМІННИХ НА C-ВКАЗІВНИКИ
+    // =======================================================
+    std::atomic<bool> trigger_enabled_{false};
+    int trigger_pin_num_ = -1;
+    struct gpiod_chip *gpio_chip_ = nullptr;
+    struct gpiod_line *gpio_trigger_line_ = nullptr;
 };
 
 #endif // SPIDER_CAMERA_HPP

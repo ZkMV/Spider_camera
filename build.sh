@@ -1,10 +1,10 @@
 #!/bin/bash
-# build.sh - Compilation script for SpiderCamera library (v0.3.0)
+# build.sh - Compilation script for SpiderCamera library (v0.4.1)
 
 set -e  # Exit on error
 
 echo "===================================="
-echo "  SpiderCamera Build Script (v0.3.0)"
+echo "  SpiderCamera Build Script (v0.4.1)"
 echo "===================================="
 
 # Configuration
@@ -26,7 +26,9 @@ CXXFLAGS="-std=c++17 -fPIC -O2 -Wall -Wextra -Wno-unused-parameter"
 LIBCAMERA_CFLAGS="$(pkg-config --cflags libcamera)"
 INCLUDES="-I./include -I$PYBIND_INCLUDE -I$PYTHON_INCLUDE $LIBCAMERA_CFLAGS"
 LIBCAMERA_LIBS="$(pkg-config --libs libcamera)"
-LIBS="$LIBCAMERA_LIBS -lpthread"
+
+# 🎯 v0.4: Додаємо libgpiod до лінкера
+LIBS="$LIBCAMERA_LIBS -lpthread -lgpiod"
 LDFLAGS="-shared"
 
 # Output file

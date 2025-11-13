@@ -1,9 +1,10 @@
 /*
  * spider_camera.cpp
  *
- * Implementation file for the SpiderCamera library (v0.3.16 - Resolution Parameter).
- * v0.3.16: 1. Implemented set_resolution().
- * 2. create_capture_config() now uses target_width/height variables.
+ * Implementation file for the SpiderCamera library (v0.4.3 - C-API GPIO Fix).
+ * v0.4.3: 1. Switched from gpiod.hpp (C++ wrapper) to gpiod.h (C API)
+ * to fix "undefined symbol" linking errors.
+ * 2. Re-implemented all GPIO logic using C functions (gpiod_chip_open, etc.)
  */
 
 #include "spider_camera.hpp"
@@ -20,6 +21,9 @@
 #include <unistd.h>
 #include <cstring> 
 #include <sstream> 
+
+// 🎯 v0.4.3: ПЕРЕМИКАЄМОСЬ НА C API
+#include <gpiod.h>
 
 // Макроси логування
 #define LOG_INFO(msg)   std::cout << "[INFO]  " << msg << std::endl
@@ -43,7 +47,6 @@ SpiderCamera::SpiderCamera() : state_(0), active_camera_id_(-1) {
     }
 }
 
-// ... (Деструктор, set_cam, get_cam, release_camera, stop - БЕЗ ЗМІН) ...
 SpiderCamera::~SpiderCamera() {
     LOG_INFO("Shutting down...");
     if (state_ == 2) {
@@ -67,6 +70,7 @@ SpiderCamera::~SpiderCamera() {
     }
 }
 
+// ... (set_cam, get_cam, release_camera - БЕЗ ЗМІН) ...
 void SpiderCamera::set_cam(int cam_id) {
     if (state_ != 0) {
         throw std::runtime_error("Cannot set camera while active. Call stop() first.");
@@ -102,6 +106,10 @@ void SpiderCamera::release_camera() {
     }
 }
 
+/**
+ * @brief [v0.4.3: ОНОВЛЕНО]
+ * Використовує C-API (gpiod_line_release, gpiod_chip_close).
+ */
 void SpiderCamera::stop() {
     if (state_ == 0) return;
     LOG_INFO("Stopping camera...");
@@ -137,6 +145,22 @@ void SpiderCamera::stop() {
     } catch (...) {
         LOG_WARN("Camera stop failed (ignored)");
     }
+    
+    // =======================================================
+    // 🎯 v0.4.3: ВИПРАВЛЕНА ЛОГІКА ОЧИЩЕННЯ GPIO (C-API)
+    // =======================================================
+    if (gpio_trigger_line_ != nullptr) {
+        LOG_DEBUG("Releasing GPIO trigger line");
+        gpiod_line_set_value(gpio_trigger_line_, 0); // Повертаємо в LOW
+        gpiod_line_release(gpio_trigger_line_);
+        gpio_trigger_line_ = nullptr;
+    }
+    if (gpio_chip_ != nullptr) {
+        gpiod_chip_close(gpio_chip_);
+        gpio_chip_ = nullptr;
+    }
+    // =======================================================
+    
     release_camera();
     camera_.reset();
     active_camera_id_ = -1;
@@ -148,11 +172,7 @@ void SpiderCamera::stop() {
     LOG_INFO("Camera stopped (state 0)");
 }
 
-/**
- * @brief [v0.3.16: ОНОВЛЕНО]
- * Тепер використовує target_width_ та target_height_
- * для вибору розміру кадру.
- */
+// ... (create_capture_config, allocate_buffers, create_requests - БЕЗ ЗМІН) ...
 std::unique_ptr<libcamera::CameraConfiguration> SpiderCamera::create_capture_config() {
     auto config = camera_->generateConfiguration({libcamera::StreamRole::Viewfinder});
     if (!config) {
@@ -162,7 +182,6 @@ std::unique_ptr<libcamera::CameraConfiguration> SpiderCamera::create_capture_con
     LOG_INFO("Generated base config for stream role 'Viewfinder'");
     const libcamera::StreamFormats &formats = stream_config.formats();
     
-    // ... (Логіка вибору PixelFormat БЕЗ ЗМІН) ...
     if (formats.pixelformats().end() != std::find(formats.pixelformats().begin(), 
                                                   formats.pixelformats().end(), 
                                                   libcamera::formats::YUV420)) {
@@ -186,24 +205,18 @@ std::unique_ptr<libcamera::CameraConfiguration> SpiderCamera::create_capture_con
         throw std::runtime_error("No sizes available for the selected format.");
     }
     
-    // =======================================================
-    // 🎯 v0.3.16: ОНОВЛЕНА ЛОГІКА ВИБОРУ РОЗДІЛЬНОЇ ЗДАТНОСТІ
-    // =======================================================
     libcamera::Size target_size;
     std::string target_res_str;
 
     if (target_width_ == 0 || target_height_ == 0) {
-        // Якщо не встановлено, використовуємо старий жорсткий код (4056x3040)
         LOG_INFO("No target resolution set via set_resolution(), using default (4056x3040).");
         target_size = {4056, 3040};
         target_res_str = "4056x3040";
     } else {
-        // Використовуємо значення, передані з Python
         target_size = {target_width_, target_height_};
         target_res_str = std::to_string(target_width_) + "x" + std::to_string(target_height_);
         LOG_INFO("Using target resolution from config: " << target_res_str);
     }
-    // =======================================================
     
     bool found = false;
     for (const auto& size : sizes) {
@@ -214,7 +227,6 @@ std::unique_ptr<libcamera::CameraConfiguration> SpiderCamera::create_capture_con
         }
     }
     if (!found) {
-        // Якщо бажаний розмір не знайдено, використовуємо найбільший доступний
         stream_config.size = sizes.back(); 
         LOG_WARN("Target resolution " << target_res_str << " not available for this format.");
         LOG_WARN("Falling back to largest available: " 
@@ -269,6 +281,7 @@ void SpiderCamera::create_requests() {
     LOG_INFO("Created " << requests_.size() << " requests");
 }
 
+
 void SpiderCamera::be_ready() {
     if (!camera_) {
         throw std::runtime_error("No camera selected. Call set_cam() first.");
@@ -312,6 +325,7 @@ void SpiderCamera::be_ready() {
         allocate_buffers();
         create_requests();
 
+        // v0.4.1: Підключаємо лише requestCompleted
         camera_->requestCompleted.connect(this, &SpiderCamera::handle_request_complete);
         LOG_DEBUG("Connected requestCompleted signal");
 
@@ -326,9 +340,65 @@ void SpiderCamera::be_ready() {
 }
 
 // =======================================================
-// 🎯 v0.3.16: РЕАЛІЗАЦІЯ НОВИХ СЕТТЕРІВ
+// 🎯 v0.4.3: РЕАЛІЗАЦІЯ СЕТТЕРІВ GPIO (C-API)
 // =======================================================
 
+void SpiderCamera::enable_frame_trigger(bool enable) {
+    LOG_INFO("Setting frame trigger to: " << (enable ? "ON" : "OFF"));
+    trigger_enabled_ = enable;
+}
+
+/**
+ * @brief [v0.4.4: RPi 5 Fix]
+ * Використовує 'gpiochip4' за замовчуванням (для RPi 5).
+ * Використовує C-API (gpiod_line_request_output).
+ */
+void SpiderCamera::set_frame_trigger_pin(int pin_num) {
+    if (state_ != 0) {
+        throw std::runtime_error("Cannot set GPIO pin while camera is active. Call stop() first.");
+    }
+    LOG_INFO("Configuring GPIO trigger on pin " << pin_num);
+
+    // Очищаємо попередні, якщо є
+    if (gpio_trigger_line_) { gpiod_line_release(gpio_trigger_line_); }
+    if (gpio_chip_) { gpiod_chip_close(gpio_chip_); }
+
+    try {
+        // 🎯 v0.4.4: ЗМІНЕНО НА 'gpiochip4' ДЛЯ RASPBERRY PI 5
+        const char* chip_name = "gpiochip4";
+        gpio_chip_ = gpiod_chip_open_by_name(chip_name);
+        if (!gpio_chip_) {
+            throw std::runtime_error("gpiod_chip_open_by_name failed.");
+        }
+        
+        gpio_trigger_line_ = gpiod_chip_get_line(gpio_chip_, pin_num);
+        if (!gpio_trigger_line_) {
+            throw std::runtime_error("gpiod_chip_get_line failed.");
+        }
+        
+        int ret = gpiod_line_request_output(gpio_trigger_line_, "SpiderCameraTrigger", 0);
+        if (ret < 0) {
+            throw std::runtime_error("gpiod_line_request_output failed.");
+        }
+        
+        trigger_pin_num_ = pin_num;
+        LOG_INFO("GPIO pin " << pin_num << " on " << chip_name << " configured as OUTPUT");
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("Failed to configure GPIO pin " << pin_num << ": " << e.what());
+        LOG_ERROR("Common issues: 1) Is 'libgpiod-dev' installed? 2) Is 'gpiochip4' correct? (Try 'gpiochip0' on RPi 4/older)");
+        // Очищаємо, якщо сталася помилка
+        if (gpio_trigger_line_) { gpiod_line_release(gpio_trigger_line_); }
+        if (gpio_chip_) { gpiod_chip_close(gpio_chip_); }
+        gpio_trigger_line_ = nullptr;
+        gpio_chip_ = nullptr;
+        trigger_pin_num_ = -1;
+        throw;
+    }
+}
+
+
+// ... (set_exposure, set_focus, set_iso, set_resolution - БЕЗ ЗМІН) ...
 void SpiderCamera::set_exposure(int exposure_us) {
     if (exposure_us <= 0) {
         LOG_WARN("Exposure value must be positive. Ignoring.");
@@ -348,17 +418,11 @@ void SpiderCamera::set_iso(int iso) {
         LOG_WARN("ISO value must be positive. Ignoring.");
         return;
     }
-
     total_gain_ = iso / BASE_ISO_;
-    
     LOG_INFO("Setting ISO to " << iso 
              << " (Calculated Total AnalogueGain: " << total_gain_ << ")");
 }
 
-/**
- * @brief [v0.3.16: НОВА ФУНКЦІЯ]
- * Зберігає цільову роздільну здатність.
- */
 void SpiderCamera::set_resolution(int w, int h) {
     if (w <= 0 || h <= 0) {
         LOG_WARN("Resolution values must be positive. Ignoring.");
@@ -370,11 +434,7 @@ void SpiderCamera::set_resolution(int w, int h) {
 }
 
 
-/**
- * @brief [v0.3.15: ОНОВЛЕНО]
- * Повертаємось до AeEnable=false.
- * Використовуємо *тільки* AnalogueGain.
- */
+// ... (go() - БЕЗ ЗМІН) ...
 void SpiderCamera::go() {
     if (state_ != 1) {
         throw std::runtime_error("Camera must be in ready state (1). Current state: " + 
@@ -405,25 +465,14 @@ void SpiderCamera::go() {
         for (auto &request : requests_) {
             libcamera::ControlList &controls = request->controls();
             
-            // =======================================================
-            // 🎯 v0.3.15: ФІНАЛЬНИЙ ФІКС
-            // =======================================================
-            
-            // 1. Прибираємо помилку "0x0000001c"
-            // int64_t frame_duration[2] = {71428, 71428}; // 14fps
-            // controls.set(libcamera::controls::FrameDurationLimits, frame_duration);
-            
-            // 2. ВИМИКАЄМО "домовика" (AE/AWB)
+            // v0.3.15: ФІНАЛЬНИЙ ФІКС
             controls.set(libcamera::controls::AeEnable, false);
             controls.set(libcamera::controls::AwbEnable, false); 
-            
-            // 3. Встановлюємо наші примусові ручні значення
             controls.set(libcamera::controls::ExposureTime, exposure_us_);
             controls.set(libcamera::controls::AnalogueGain, total_gain_);
             controls.set(libcamera::controls::DigitalGain, 1.0f); // Завжди 1.0
             controls.set(libcamera::controls::LensPosition, focus_value_);
             
-            // (Логуємо лише для першого запиту)
             if (request == requests_[0]) {
                  log_msg << "AE/AWB=FALSE (Manual), "
                          << "ISO~" << (int)(BASE_ISO_ * total_gain_)
@@ -431,7 +480,6 @@ void SpiderCamera::go() {
                          << "Exp: " << exposure_us_ << "us, "
                          << "Focus: " << focus_value_;
             }
-            // =======================================================
             
             camera_->queueRequest(request.get());
         }
@@ -454,9 +502,7 @@ void SpiderCamera::go() {
     }
 }
 
-// ... (pause(), stream_loop(), handle_request_complete() і т.д. - БЕЗ ЗМІН) ...
-// (Важливо: handle_request_complete все ще має містити логіку пропуску 5 кадрів!)
-
+// ... (pause(), stream_loop() - БЕЗ ЗМІН) ...
 void SpiderCamera::pause() {
     if (state_ != 2) {
         throw std::runtime_error("Camera is not streaming. Current state: " + 
@@ -491,8 +537,29 @@ void SpiderCamera::stream_loop() {
     LOG_DEBUG("Stream loop ended");
 }
 
-
+/**
+ * @brief [v0.4.3: ОНОВЛЕНО]
+ * Використовує C-API (gpiod_line_set_value).
+ * [v0.4.4: FIX] Прибрано '.get()' з 'queueRequest(request)', оскільки 'request'
+ * вже є звичайним вказівником (Request*), а не unique_ptr.
+ */
 void SpiderCamera::handle_request_complete(libcamera::Request *request) {
+    
+    const int FRAMES_TO_SKIP_FOR_WARMUP = 5;
+
+    // =======================================================
+    // 🎯 v0.4.3: ВСТАНОВЛЮЄМО GPIO LOW (C-API)
+    // =======================================================
+    if (trigger_enabled_ && gpio_trigger_line_ != nullptr) {
+        if (frame_count_ > FRAMES_TO_SKIP_FOR_WARMUP) {
+            if (gpiod_line_set_value(gpio_trigger_line_, 0) < 0) { // 0 = LOW
+                LOG_WARN("Failed to set GPIO LOW");
+            }
+            LOG_DEBUG("GPIO LOW (Frame End)");
+        }
+    }
+    // =======================================================
+
     if (request->status() == libcamera::Request::RequestCancelled) {
         LOG_DEBUG("Request was cancelled");
         return;
@@ -501,6 +568,7 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
     if (request->status() != libcamera::Request::RequestComplete) {
         LOG_ERROR("Request failed (status: " << static_cast<int>(request->status()) << "), frame dropped.");
         error_count_++;
+        // 🎯 v0.4.4: ВИПРАВЛЕНО (прибрано .get())
         request->reuse(libcamera::Request::ReuseBuffers);
         camera_->queueRequest(request);
         return;
@@ -511,6 +579,7 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
     
     if (buffers.empty()) {
         LOG_ERROR("No buffers in completed request");
+        // 🎯 v0.4.4: ВИПРАВЛЕНО (прибрано .get())
         request->reuse(libcamera::Request::ReuseBuffers);
         camera_->queueRequest(request);
         return;
@@ -518,23 +587,30 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
 
     libcamera::FrameBuffer *buffer = buffers.begin()->second;
     
-    // =======================================================
-    // 🎯 ЛОГІКА ПРОПУСКУ КАДРІВ (РОЗІГРІВ)
-    // =======================================================
-    frame_count_++; // Спочатку збільшуємо лічильник
-    const int FRAMES_TO_SKIP_FOR_WARMUP = 5;
-
+    // ЛОГІКА ПРОПУСКУ КАДРІВ (РОЗІГРІВ)
+    frame_count_++; // Інкрементуємо лічильник
+    
     if (frame_count_ <= FRAMES_TO_SKIP_FOR_WARMUP) {
         if (frame_count_ == 1) {
             LOG_INFO("Dropping first " << FRAMES_TO_SKIP_FOR_WARMUP << " frames for sensor warmup...");
         }
         LOG_DEBUG("Skipping warm-up frame #" << frame_count_);
-        // Просто повертаємо буфер в чергу і виходимо, не обробляючи
+        
+        // 🎯 v0.4.3: Встановлюємо HIGH для *першого* кадру (#6) (C-API)
+        if (frame_count_ == FRAMES_TO_SKIP_FOR_WARMUP) { 
+            if (trigger_enabled_ && gpio_trigger_line_ != nullptr) {
+                if (gpiod_line_set_value(gpio_trigger_line_, 1) < 0) { // 1 = HIGH
+                    LOG_WARN("Failed to set initial GPIO HIGH");
+                }
+                LOG_DEBUG("GPIO HIGH (Trigger for first frame #6)");
+            }
+        }
+        
+        // 🎯 v0.4.4: ВИПРАВЛЕНО (прибрано .get())
         request->reuse(libcamera::Request::ReuseBuffers);
         camera_->queueRequest(request);
         return;
     }
-    // =======================================================
 
     
     LOG_DEBUG("Processing frame #" << frame_count_ << ": " << frame_width_ << "x" << frame_height_);
@@ -559,9 +635,10 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
         fps_start_time_ = now;
     }
     
-    // ... (Robust MMAP Handling, Plane Copying - БЕЗ ЗМІН) ...
+    // ... (Robust MMAP Handling, Plane Copying, etc. - БЕЗ ЗМІН) ...
     if (buffer->planes().size() < 3) {
         LOG_ERROR("YUV: Expected 3 planes, but buffer has " << buffer->planes().size());
+        // 🎯 v0.4.4: ВИПРАВЛЕНО (прибрано .get())
         request->reuse(libcamera::Request::ReuseBuffers);
         camera_->queueRequest(request);
         return;
@@ -578,6 +655,7 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
 
     if (buffer_base_ptr == MAP_FAILED) {
         LOG_ERROR("Failed to mmap YUV buffer (errno " << errno << ")");
+        // 🎯 v0.4.4: ВИПРАВЛЕНО (прибрано .get())
         request->reuse(libcamera::Request::ReuseBuffers);
         camera_->queueRequest(request);
         return;
@@ -650,6 +728,21 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
         munmap(buffer_base_ptr, total_buffer_span);
     }
 
+    // =======================================================
+    // 🎯 v0.4.3: ВСТАНОВЛЮЄМО GPIO HIGH (C-API)
+    // =======================================================
+    if (trigger_enabled_ && gpio_trigger_line_ != nullptr) {
+        if (streaming_) { 
+            if (gpiod_line_set_value(gpio_trigger_line_, 1) < 0) { // 1 = HIGH
+                LOG_WARN("Failed to set GPIO HIGH");
+            }
+            LOG_DEBUG("GPIO HIGH (Trigger for next frame)");
+        }
+    }
+    // =======================================================
+    
+    // Requeue the request
+    // 🎯 v0.4.4: ВИПРАВЛЕНО (прибрано .get())
     request->reuse(libcamera::Request::ReuseBuffers);
     camera_->queueRequest(request);
 }
