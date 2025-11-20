@@ -79,6 +79,11 @@ private:
     void handle_request_complete(libcamera::Request *request);
     void stream_loop();
     py::array convert_to_numpy(libcamera::FrameBuffer *buffer); // (Deprecated)
+    
+    // 💡  ========== [РЕАЛІЗАЦІЯ ТЗ] ==========
+    // Додаємо новий приватний метод для інкапсуляції логіки "HIGH + Queue"
+    void requestCapture(libcamera::Request *request);
+    // 💡  =======================================
 
     std::atomic<int> state_{0};
     int active_camera_id_ = -1;

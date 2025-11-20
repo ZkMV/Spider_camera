@@ -462,6 +462,9 @@ void SpiderCamera::go() {
         std::stringstream log_msg;
         log_msg << "Queued " << requests_.size() << " requests: ";
 
+        // 💡 ПРИМІТКА: Початкове заповнення черги не викликає requestCapture(),
+        // оскільки логіка "розігріву" (в handle_request_complete)
+        // обробляє перший сигнал HIGH.
         for (auto &request : requests_) {
             libcamera::ControlList &controls = request->controls();
             
@@ -542,92 +545,80 @@ void SpiderCamera::stream_loop() {
  * Використовує C-API (gpiod_line_set_value).
  * [v0.4.4: FIX] Прибрано '.get()' з 'queueRequest(request)', оскільки 'request'
  * вже є звичайним вказівником (Request*), а не unique_ptr.
+ * * 💡 [РЕАЛІЗАЦІЯ ТЗ]:
+ * 1. Логіка SET_LOW залишається на самому початку (як вимагає ТЗ).
+ * 2. Логіка SET_HIGH + queueRequest винесена в requestCapture().
  */
+// Знайти цей метод у src/spider_camera.cpp і замінити повністю:
+
 void SpiderCamera::handle_request_complete(libcamera::Request *request) {
     
+    // 1. Якщо зупиняємось - ігноруємо все.
+    if (!streaming_) {
+        return;
+    }
+
+    // 2. Якщо запит скасовано камерою - це нормально при зупинці, ігноруємо.
+    if (request->status() == libcamera::Request::RequestCancelled) {
+        return;
+    }
+
     const int FRAMES_TO_SKIP_FOR_WARMUP = 5;
 
-    // =======================================================
-    // 🎯 v0.4.3: ВСТАНОВЛЮЄМО GPIO LOW (C-API)
-    // =======================================================
+    // GPIO: Вимикаємо світло (LOW)
     if (trigger_enabled_ && gpio_trigger_line_ != nullptr) {
         if (frame_count_ > FRAMES_TO_SKIP_FOR_WARMUP) {
-            if (gpiod_line_set_value(gpio_trigger_line_, 0) < 0) { // 0 = LOW
-                LOG_WARN("Failed to set GPIO LOW");
-            }
-            LOG_DEBUG("GPIO LOW (Frame End)");
+            gpiod_line_set_value(gpio_trigger_line_, 0); 
         }
     }
-    // =======================================================
 
-    if (request->status() == libcamera::Request::RequestCancelled) {
-        LOG_DEBUG("Request was cancelled");
-        return;
-    }
-
+    // 🛑 FIX ЦИКЛУ ПОМИЛОК:
+    // Якщо запит завершився невдало (Status != Complete), ми НЕ ПОВИННІ 
+    // його перезапускати, бо це створює нескінченний шторм помилок.
     if (request->status() != libcamera::Request::RequestComplete) {
-        LOG_ERROR("Request failed (status: " << static_cast<int>(request->status()) << "), frame dropped.");
+        // Логуємо лише перші кілька помилок, щоб не забивати консоль при падінні
+        if (error_count_ < 10) {
+             LOG_ERROR("Request failed (status: " << static_cast<int>(request->status()) << "). Dropping frame.");
+        }
         error_count_++;
-        // 🎯 v0.4.4: ВИПРАВЛЕНО (прибрано .get())
-        request->reuse(libcamera::Request::ReuseBuffers);
-        camera_->queueRequest(request);
-        return;
+        
+        // ☠️ ВАЖЛИВО: МИ НЕ ВИКЛИКАЄМО requestCapture(request) ТУТ!
+        // Ми просто "губимо" цей буфер. Це безпечніше, ніж класти камеру.
+        return; 
     }
 
-    const std::map<const libcamera::Stream *, libcamera::FrameBuffer *> &buffers = 
-        request->buffers();
-    
+    // Перевірка буферів
+    const std::map<const libcamera::Stream *, libcamera::FrameBuffer *> &buffers = request->buffers();
     if (buffers.empty()) {
         LOG_ERROR("No buffers in completed request");
-        // 🎯 v0.4.4: ВИПРАВЛЕНО (прибрано .get())
-        request->reuse(libcamera::Request::ReuseBuffers);
-        camera_->queueRequest(request);
-        return;
+        return; // Також не перезапускаємо, щоб уникнути циклу
     }
 
     libcamera::FrameBuffer *buffer = buffers.begin()->second;
     
-    // ЛОГІКА ПРОПУСКУ КАДРІВ (РОЗІГРІВ)
-    frame_count_++; // Інкрементуємо лічильник
+    // --- ЛОГІКА WARMUP ---
+    frame_count_++; 
     
     if (frame_count_ <= FRAMES_TO_SKIP_FOR_WARMUP) {
         if (frame_count_ == 1) {
             LOG_INFO("Dropping first " << FRAMES_TO_SKIP_FOR_WARMUP << " frames for sensor warmup...");
         }
-        LOG_DEBUG("Skipping warm-up frame #" << frame_count_);
-        
-        // 🎯 v0.4.3: Встановлюємо HIGH для *першого* кадру (#6) (C-API)
         if (frame_count_ == FRAMES_TO_SKIP_FOR_WARMUP) { 
             if (trigger_enabled_ && gpio_trigger_line_ != nullptr) {
-                if (gpiod_line_set_value(gpio_trigger_line_, 1) < 0) { // 1 = HIGH
-                    LOG_WARN("Failed to set initial GPIO HIGH");
-                }
-                LOG_DEBUG("GPIO HIGH (Trigger for first frame #6)");
+                gpiod_line_set_value(gpio_trigger_line_, 1);
             }
         }
-        
-        // 🎯 v0.4.4: ВИПРАВЛЕНО (прибрано .get())
-        request->reuse(libcamera::Request::ReuseBuffers);
-        camera_->queueRequest(request);
+        // Тут все безпечно, бо ми знаємо, що RequestComplete
+        requestCapture(request);
         return;
     }
 
+    // --- ОБРОБКА КАДРУ (COPY/MMAP) ---
     
-    LOG_DEBUG("Processing frame #" << frame_count_ << ": " << frame_width_ << "x" << frame_height_);
-
-    // ... (Timestamp logging, FPS logging - БЕЗ ЗМІН) ...
-    const libcamera::ControlList &metadata = request->metadata();
-    double timestamp_us = 0.0;
-    if (metadata.contains(libcamera::controls::SensorTimestamp.id())) {
-        int64_t ts_ns = *metadata.get(libcamera::controls::SensorTimestamp);
-        timestamp_us = ts_ns / 1000.0;
-        LOG_DEBUG("  Timestamp: " << ts_ns << " ns (" << (timestamp_us / 1000.0) << " ms)");
-    }
-
+    // FPS Logger
     if (frame_count_ % 10 == 0) {
         auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - fps_start_time_).count();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - fps_start_time_).count();
         if (elapsed > 0) {
             double fps = 10000.0 / elapsed;
             LOG_INFO("Frame rate: " << std::fixed << std::setprecision(1) << fps << " fps");
@@ -635,12 +626,9 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
         fps_start_time_ = now;
     }
     
-    // ... (Robust MMAP Handling, Plane Copying, etc. - БЕЗ ЗМІН) ...
     if (buffer->planes().size() < 3) {
-        LOG_ERROR("YUV: Expected 3 planes, but buffer has " << buffer->planes().size());
-        // 🎯 v0.4.4: ВИПРАВЛЕНО (прибрано .get())
-        request->reuse(libcamera::Request::ReuseBuffers);
-        camera_->queueRequest(request);
+        LOG_ERROR("YUV: Expected 3 planes");
+        requestCapture(request); // Тут можна ризикнути повернути
         return;
     }
 
@@ -649,89 +637,88 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
     const libcamera::FrameBuffer::Plane &v_plane = buffer->planes()[2];
 
     size_t total_buffer_span = (v_plane.offset - y_plane.offset) + v_plane.length;
+    void *buffer_base_ptr = mmap(nullptr, total_buffer_span, PROT_READ, MAP_SHARED, y_plane.fd.get(), y_plane.offset);
+
+    if (buffer_base_ptr != MAP_FAILED) {
+        try {
+            const uint8_t *base_ptr = static_cast<const uint8_t*>(buffer_base_ptr);
+            
+            // ВАШ КОД КОПІЮВАННЯ (зберіг скорочено для читабельності)
+            size_t y_size = frame_width_ * frame_height_;
+            size_t uv_width = frame_width_ / 2;
+            size_t uv_height = frame_height_ / 2;
+            size_t uv_size = uv_width * uv_height;
+            size_t total_size = y_size + uv_size + uv_size;
+
+            std::vector<uint8_t> frame_data(total_size);
+            uint8_t *dst = frame_data.data();
+            
+            // Y Plane
+            if (frame_stride_y_ == frame_width_) {
+                std::memcpy(dst, base_ptr, y_size);
+            } else {
+                const uint8_t *src = base_ptr;
+                for (uint32_t i = 0; i < frame_height_; ++i) {
+                    std::memcpy(dst, src, frame_width_);
+                    src += frame_stride_y_;
+                    dst += frame_width_;
+                }
+            }
+            
+            // UV Planes
+            const uint8_t *u_src = base_ptr + (u_plane.offset - y_plane.offset);
+            uint8_t *u_dst = dst + y_size;
+             if (frame_stride_uv_ == uv_width) {
+                std::memcpy(u_dst, u_src, uv_size);
+            } else {
+                for(uint32_t i=0; i<uv_height; ++i) {
+                    std::memcpy(u_dst, u_src, uv_width);
+                    u_src += frame_stride_uv_;
+                    u_dst += uv_width;
+                }
+            }
+            
+            const uint8_t *v_src = base_ptr + (v_plane.offset - y_plane.offset);
+            uint8_t *v_dst = u_dst + uv_size;
+             if (frame_stride_uv_ == uv_width) {
+                std::memcpy(v_dst, v_src, uv_size);
+            } else {
+                for(uint32_t i=0; i<uv_height; ++i) {
+                    std::memcpy(v_dst, v_src, uv_width);
+                    v_src += frame_stride_uv_;
+                    v_dst += uv_width;
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(frame_buffer_mutex_);
+                frame_data_buffer_.push_back(std::move(frame_data));
+            }
+            error_count_ = 0;
+            
+        } catch (...) {
+            LOG_ERROR("Frame copy exception");
+        }
+        munmap(buffer_base_ptr, total_buffer_span);
+    }
+
+    // Успішно оброблений кадр повертаємо в чергу
+    requestCapture(request);
+}
+
+/**
+ * @brief [РЕАЛІЗАЦІЯ ТЗ]
+ * Новий приватний метод, що інкапсулює логіку ТЗ:
+ * "Ввімкнути світло (HIGH) -> Поставити запит в чергу (queueRequest)"
+ */
+void SpiderCamera::requestCapture(libcamera::Request *request) {
     
-    void *buffer_base_ptr = mmap(nullptr, total_buffer_span, PROT_READ, MAP_SHARED, 
-                                 y_plane.fd.get(), y_plane.offset);
-
-    if (buffer_base_ptr == MAP_FAILED) {
-        LOG_ERROR("Failed to mmap YUV buffer (errno " << errno << ")");
-        // 🎯 v0.4.4: ВИПРАВЛЕНО (прибрано .get())
-        request->reuse(libcamera::Request::ReuseBuffers);
-        camera_->queueRequest(request);
-        return;
-    }
-
-    try {
-        const uint8_t *base_ptr = static_cast<const uint8_t*>(buffer_base_ptr);
-        
-        const uint8_t *y_src_ptr = base_ptr; 
-        const uint8_t *u_src_ptr = base_ptr + (u_plane.offset - y_plane.offset);
-        const uint8_t *v_src_ptr = base_ptr + (v_plane.offset - y_plane.offset);
-
-        size_t y_size = frame_width_ * frame_height_;
-        size_t uv_width = frame_width_ / 2;
-        size_t uv_height = frame_height_ / 2;
-        size_t uv_size = uv_width * uv_height;
-        size_t total_size = y_size + uv_size + uv_size;
-
-        std::vector<uint8_t> frame_data(total_size);
-
-        uint8_t *y_dst_ptr = frame_data.data();
-        uint8_t *u_dst_ptr = y_dst_ptr + y_size;
-        uint8_t *v_dst_ptr = u_dst_ptr + uv_size;
-
-        if (frame_stride_y_ == frame_width_) {
-            std::memcpy(y_dst_ptr, y_src_ptr, y_size);
-        } else {
-            LOG_DEBUG("Stripping Y stride: " << frame_stride_y_ << " -> " << frame_width_);
-            for (uint32_t i = 0; i < frame_height_; ++i) {
-                std::memcpy(y_dst_ptr, y_src_ptr, frame_width_);
-                y_src_ptr += frame_stride_y_;
-                y_dst_ptr += frame_width_;
-            }
-        }
-
-        if (frame_stride_uv_ == uv_width) {
-            std::memcpy(u_dst_ptr, u_src_ptr, uv_size);
-        } else {
-            LOG_DEBUG("Stripping U stride: " << frame_stride_uv_ << " -> " << uv_width);
-            for (uint32_t i = 0; i < uv_height; ++i) {
-                std::memcpy(u_dst_ptr, u_src_ptr, uv_width);
-                u_src_ptr += frame_stride_uv_;
-                u_dst_ptr += uv_width;
-            }
-        }
-
-        if (frame_stride_uv_ == uv_width) {
-            std::memcpy(v_dst_ptr, v_src_ptr, uv_size);
-        } else {
-            LOG_DEBUG("Stripping V stride: " << frame_stride_uv_ << " -> " << uv_width);
-            for (uint32_t i = 0; i < uv_height; ++i) {
-                std::memcpy(v_dst_ptr, v_src_ptr, uv_width);
-                v_src_ptr += frame_stride_uv_;
-                v_dst_ptr += uv_width;
-            }
-        }
-
-        munmap(buffer_base_ptr, total_buffer_span);
-
-        {
-            std::lock_guard<std::mutex> lock(frame_buffer_mutex_);
-            frame_data_buffer_.push_back(std::move(frame_data));
-        }
-
-        LOG_DEBUG("YUV frame buffered for burst capture");
-        error_count_ = 0; 
-
-    } catch (const std::exception& e) {
-        LOG_ERROR("Frame processing failed: " << e.what());
-        munmap(buffer_base_ptr, total_buffer_span);
-    }
-
     // =======================================================
-    // 🎯 v0.4.3: ВСТАНОВЛЮЄМО GPIO HIGH (C-API)
+    // 🎯 [РЕАЛІЗАЦІЯ ТЗ]: 💡 Вмикаємо світло ДО старту експозиції
     // =======================================================
     if (trigger_enabled_ && gpio_trigger_line_ != nullptr) {
+        // Ми перевіряємо streaming_, щоб не вмикати світло,
+        // коли ми зупиняємо потік (streaming_ == false)
         if (streaming_) { 
             if (gpiod_line_set_value(gpio_trigger_line_, 1) < 0) { // 1 = HIGH
                 LOG_WARN("Failed to set GPIO HIGH");
@@ -741,11 +728,11 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
     }
     // =======================================================
     
-    // Requeue the request
-    // 🎯 v0.4.4: ВИПРАВЛЕНО (прибрано .get())
+    // Повторно ставимо запит в чергу
     request->reuse(libcamera::Request::ReuseBuffers);
     camera_->queueRequest(request);
 }
+
 
 // ... (get_frame_properties, get_burst_frames - БЕЗ ЗМІН) ...
 py::tuple SpiderCamera::get_frame_properties() {

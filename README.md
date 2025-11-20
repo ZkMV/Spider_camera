@@ -171,11 +171,38 @@ SpiderCamera/
 ├── bindings/
 │   └── pybind_spider.cpp        # Python bindings (pybind11)
 ├── examples/
-│   ├── demo_python.py           # Test script for v0.3 (YUV Burst)
-│   └── demo_config.json         # v0.3 config file (ISO, Exp, Res, Focus)
+│   ├── demo_python.py           # CLI Burst Capture (Headless)
+│   ├── demo_python_preview.py   # Headless Preview (saves to temp/spider_preview.jpg)
+│   ├── spider_preview_gui.py    # GUI Control (PyQt5) with real-time preview
+│   └── demo_config.json         # Shared configuration file
 ├── build.sh                     # Build script
 └── Specification.md             # Technical specification
 ```
+
+## Demo & Testing Tools
+
+The library includes three Python scripts to verify functionality and performance:
+
+1.  **`demo_python.py` (Burst Benchmark)**
+    * **Use case:** Performance testing and headless capture.
+    * **Action:** Loads config, captures a high-speed burst (e.g., 1.5s), calculates actual FPS, and saves frames to `temp/`.
+    * **Run:** `python3 examples/demo_python.py`
+
+2.  **`demo_python_preview.py` (Headless Preview)**
+    * **Use case:** Monitoring the feed without a display attached.
+    * **Action:** Continuously fetches frames and updates a single JPEG file (`temp/spider_preview.jpg`). Useful for checking focus/framing via a file browser or web server.
+    * **Run:** `python3 examples/demo_python_preview.py`
+
+3.  **`spider_preview_gui.py` (GUI Control Panel)**
+    * **Use case:** Interactive configuration and real-time feedback.
+    * **Features:**
+        * Live viewfinder (~2 FPS visualization).
+        * **Hot-swappable parameters:** Sliders for ISO, Exposure, and Focus.
+        * Resolution switcher (triggers soft-restart).
+        * Saves current settings to `demo_config.json`.
+    * **Run:** `python3 examples/spider_preview_gui.py`
+    * *Requires: `python3-pyqt5`*
+
 
 ## Git History
 
@@ -216,13 +243,21 @@ SpiderCamera/
 
 ### v0.4 — GPIO Trigger (planned)
 
-**Status:** 📋 Not started
+**Status:** ✅ Complete and tested
 
-**Planned features:**
+**Features:**
+* set_frame_trigger_pin() and enable_frame_trigger() implementation.
+* Hardware sync: GPIO HIGH on frame start, LOW on frame end.
+* Switched to C-API (libgpiod) for stability on RPi 5.
 
-* GPIO pin configuration for trigger.
-* Hardware trigger mode (HIGH = streaming, LOW = paused).
-* `libgpiod` integration.
+### v0.5 — GUI & Stability (2025-11-20)
+**Status:** ✅ Complete and tested
+
+**Features:**
+* PyQt5 GUI: Created spider_preview_gui.py for real-time parameter tuning.
+* Stability Fix: Fixed race conditions in stop() method to prevent library crashes during rapid parameter changes.
+* Headless Preview: Added demo_python_preview.py for continuous monitoring.
+* YUV Pipeline: Fully transitioned to YUV420 for high-speed burst capture (replacing raw decompression).
 
 ### v1.0 — Full Release (planned)
 
@@ -246,8 +281,44 @@ To be defined.
 * [x] v0.2 — Frame streaming (burst capture)
 * [x] v0.3 — Hot parameters
 * [x] v0.4 — GPIO trigger
-* [ ] v0.5 — Performance optimization (CSI2P support)
+* [x] v0.5 — GUI Preview & Stability Optimization. WIP: Needs better synchronization debugging in real operating conditions. 
+	Considering on-the-fly software adjustment of phase shift and extending light frames by several camera frames.
 * [ ] v1.0 — Production release
+
+
+## Installation & Requirements
+```
+Since PyQt5 on Raspberry Pi (ARM) is best installed via the system package manager to avoid compilation errors, the installation is split into two steps.
+```
+### Step 1: System Dependencies (via apt)
+Install core C++ libraries and Qt5 system packages:
+```
+sudo apt update
+sudo apt install -y libcamera-dev libgpiod-dev python3-pyqt5 python3-pyqt5.qtquick libqt5gui5 libqt5widgets5
+```
+
+**Important:** To allow your virtual environment to use the system-installed PyQt5, you must enable access to system site-packages:
+1. Open your venv configuration: nano .venv/pyvenv.cfg
+2. Change include-system-site-packages = false to:
+
+```
+include-system-site-packages = true
+```
+**Step 2:** Python Dependencies (via pip)
+Install the remaining Python packages (NumPy, OpenCV headless, pybind11) using the provided requirements file:
+```
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+**Step 3:** Build the Library
+Run the build script to compile the C++ code. This will generate the spider_camera.cpython-*.so module directly in the project root directory.
+
+```
+chmod +x build.sh
+./build.sh
+```
+	**Note:** You do not need to move the generated .so file. The scripts in the examples/ folder are pre-configured to find the spider_camera module in the project root directory automatically.
 
 ## License
 

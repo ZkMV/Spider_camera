@@ -38,7 +38,7 @@ except ImportError as e:
 # ============================================
 
 # Тривалість захоплення в секундах
-CAPTURE_DURATION_SEC = 2.0 
+CAPTURE_DURATION_SEC = 1.5 
 
 # 🎯 Шлях до файлу конфігурації
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "demo_config.json")
