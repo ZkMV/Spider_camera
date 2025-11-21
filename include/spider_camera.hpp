@@ -1,9 +1,9 @@
 /*
  * spider_camera.hpp
  *
- * Header file for the SpiderCamera library (v0.4.3 - C-API GPIO Fix).
- * v0.4.3: Switched from gpiod.hpp (C++ wrapper) to gpiod.h (C API)
- * to fix "undefined symbol" linking errors.
+ * Header file for the SpiderCamera library (v0.6 - Stride Fix).
+ * v0.6: Added 'stride_' field to handle hardware padding correctly.
+ * v0.4.3: Switched to C-API gpiod.h to fix linking errors.
  */
 
 #ifndef SPIDER_CAMERA_HPP
@@ -20,7 +20,7 @@
 #include <pybind11/functional.h>
 #include <pybind11/numpy.h>
 
-// 🎯 v0.4.3: ПЕРЕМИКАЄМОСЬ НА C API
+// 🎯 v0.4.3: C API for GPIO
 #include <gpiod.h>
 
 #include <memory>
@@ -52,6 +52,8 @@ public:
     py::list get_burst_frames();
     void set_frame_callback(std::function<void(py::array, double)> callback);
     void enable_debug(bool enable);
+    
+    // 🎯 v0.6: Оновлена сигнатура: повертає (width, height, format, stride)
     py::tuple get_frame_properties();
 
     // --- v0.3: Hot Parameters ---
@@ -80,10 +82,8 @@ private:
     void stream_loop();
     py::array convert_to_numpy(libcamera::FrameBuffer *buffer); // (Deprecated)
     
-    // 💡  ========== [РЕАЛІЗАЦІЯ ТЗ] ==========
-    // Додаємо новий приватний метод для інкапсуляції логіки "HIGH + Queue"
+    // Helper to encapsulate "Light ON -> Queue Request" logic
     void requestCapture(libcamera::Request *request);
-    // 💡  =======================================
 
     std::atomic<int> state_{0};
     int active_camera_id_ = -1;
@@ -108,6 +108,11 @@ private:
     
     uint32_t frame_width_ = 0;
     uint32_t frame_height_ = 0;
+    
+    // 🎯 v0.6: New field for Hardware Stride (Padding)
+    uint32_t stride_ = 0;
+
+    // Legacy fields (kept to avoid heavy refactoring of unused parts, but unused in v0.6 logic)
     uint32_t frame_stride_y_ = 0;
     uint32_t frame_stride_uv_ = 0;
     libcamera::PixelFormat current_pixel_format_;
@@ -123,9 +128,7 @@ private:
     uint32_t target_height_ = 0;
     const float BASE_ISO_ = 100.0f; 
     
-    // =======================================================
-    // 🎯 v0.4.3: ЗМІНЮЄМО ТИПИ ЗМІННИХ НА C-ВКАЗІВНИКИ
-    // =======================================================
+    // --- v0.4.3: GPIO C-API Pointers ---
     std::atomic<bool> trigger_enabled_{false};
     int trigger_pin_num_ = -1;
     struct gpiod_chip *gpio_chip_ = nullptr;

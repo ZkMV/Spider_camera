@@ -11,7 +11,7 @@ SpiderCamera is a C++ wrapper around libcamera designed for high-speed RAW frame
 * 🚀 **~14 fps burst capture performance** at **3840x2400**.
 * 💾 In-memory "burst" frame buffering via `get_burst_frames()`.
 * ✅ **Hot parameter changes** (ISO, exposure, resolution, focus) via Python setters.
-* ✅ **Per-frame GPIO hardware trigger** support (for flash/strobe sync)..
+* ✅ **Per-frame GPIO hardware trigger** support (for flash/strobe sync).
 ## Requirements
 
 * Raspberry Pi with libcamera support
@@ -57,47 +57,40 @@ python3 examples/demo_python.py
 ```
 
 
-## Usage Example (v0.3 Hot Parameters)
+## ⚠️ Data Processing & Stride Handling (v0.6+)
+
+Starting from **v0.6**, the library performs a raw memory copy to prevent segmentation faults on Raspberry Pi 5 (due to ISP alignment/padding). The byte arrays returned by `get_burst_frames()` contain **padding bytes** at the end of every row.
+
+**Correct way to process frames:**
 
 ```python
-import time
-import spider_camera
-import json
+# 1. Get properties including Stride
+width, height, fmt, stride = cam.get_frame_properties()
 
-# --- 1. Load Configuration ---
-# (e.g., from examples/demo_config.json)
-with open("examples/demo_config.json", 'r') as f:
-    config = json.load(f)
+# 2. Calculate dimensions
+# For YUV420/NV12, physical height in memory is 1.5x the image height
+yuv_height = int(height * 1.5)
 
-# --- 2. Initialize & Configure ---
-cam = spider_camera.SpiderCamera()
-cam.set_cam(0)
+for flat_frame in frames:
+    # A. Determine how many stride-aligned rows are in the buffer
+    rows = flat_frame.size // stride
+    
+    # B. Reshape using Stride (NOT width)
+    # This aligns the data correctly in 2D space
+    view_2d = flat_frame[:rows*stride].reshape((rows, stride))
+    
+    # C. Crop the valid data
+    # Remove padding on the right (:width) and extra rows at bottom (:yuv_height)
+    image_data = view_2d[:yuv_height, :width]
+    
+    # D. Ensure memory is contiguous for OpenCV
+    import numpy as np
+    image_contiguous = np.ascontiguousarray(image_data)
+    
+    # E. Convert
+    bgr = cv2.cvtColor(image_contiguous, cv2.COLOR_YUV2BGR_I420)
+```
 
-# Set parameters BEFORE calling be_ready()
-cam.set_iso(config['iso'])
-cam.set_exposure(config['exposure_us'])
-cam.set_focus(config['focus_value'])
-w, h = map(int, config['resolution'].split('x'))
-cam.set_resolution(w, h)
-
-# Prepare camera. This will now use the settings above.
-cam.be_ready()
-
-# --- 3. Capture ---
-cam.go()
-time.sleep(1.0) # Capture for 1 second
-cam.pause()
-
-# --- 4. Retrieve ---
-# Frames are YUV420 format (e.g., 3840x2400)
-frame_list = cam.get_burst_frames()
-print(f"Captured {len(frame_list)} frames.")
-
-# --- 5. Process (see Application Pipeline) ---
-# (User code for OpenCV conversion, saving, or analysis)
-
-# --- 6. Shutdown ---
-cam.stop()
 
 ## Application Pipeline: Super-Resolution & Photometry
 
@@ -134,9 +127,10 @@ The intended pipeline consists of two stages:
 
 * `go()` — start YUV frame capture (state: `1 → 2`).
 * `pause()` — pause streaming, keep camera configured (state: `2 → 1`).
-* `get_burst_frames() -> list[np.ndarray]` — **(NEW in v0.2.8)** return all buffered frames as a list of NumPy arrays; performs decompression in C++ before passing frames to Python.
-* `set_frame_callback(callback)` — **deprecated in v0.2.8**; not recommended for high-speed capture. Prefer `get_burst_frames()`.
-
+* `get_burst_frames() -> list[np.ndarray]` — return all buffered frames as a list of flat NumPy arrays (includes hardware padding/stride).
+* `get_frame_properties() -> tuple` — **(UPDATED in v0.6)** returns metadata required to reconstruction the image:
+  * Returns: `(width, height, format, stride)`
+  * `stride` (int): The actual number of bytes per row in memory (including hardware padding). Critical for reshaping.
 ### Hot Parameters (v0.3)
 
 *Implementation: These setters store values which are applied during `be_ready()` and `go()`.*
@@ -154,11 +148,10 @@ The intended pipeline consists of two stages:
 * `set_frame_trigger_pin(pin: int)`: Configures the BCM GPIO pin for output (e.g., pin 21 on `gpiochip4` for RPi 5).
 * `enable_frame_trigger(enabled: bool)`: Enables/disables the trigger logic.
 * **Trigger Logic:** Generates a precise HIGH/LOW pulse for each frame.
-    * **GPIO LOW:** Встановлюється на *початку* `handle_request_complete` (кінець експозиції кадру N).
-    * **GPIO HIGH:** Встановлюється в *кінці* `handle_request_complete` (безпосередньо перед постановкою в чергу кадру N+1).
+	* **GPIO LOW:** Set at the *start* of `handle_request_complete` (end of frame N exposure).
+    * **GPIO HIGH:** Set at the *end* of `handle_request_complete` (immediately before queuing frame N+1).
 * **Implementation:** Uses the stable C-API (`gpiod.h`) for `libgpiod` to ensure compatibility and avoid "undefined symbol" linking errors.
 
-## Project Structure
 
 ```text
 SpiderCamera/
@@ -241,7 +234,7 @@ The library includes three Python scripts to verify functionality and performanc
 * Corrected gain logic: now uses `AeEnable=false` with full `AnalogueGain` (e.g., 40.0) and `DigitalGain=1.0`, successfully "exorcising" the auto-exposure "poltergeist".
 * Confirmed stable manual exposure at `100us` (verified with/without external light).
 
-### v0.4 — GPIO Trigger (planned)
+### v0.4 — GPIO Trigger (2025-11-15)
 
 **Status:** ✅ Complete and tested
 
@@ -258,6 +251,19 @@ The library includes three Python scripts to verify functionality and performanc
 * Stability Fix: Fixed race conditions in stop() method to prevent library crashes during rapid parameter changes.
 * Headless Preview: Added demo_python_preview.py for continuous monitoring.
 * YUV Pipeline: Fully transitioned to YUV420 for high-speed burst capture (replacing raw decompression).
+
+
+### v0.6 — Stride & Stability Fix (2025-11-21)
+
+**Status:** ✅ Complete and tested
+
+**Features:**
+* **Critical Fix for RPi 5:** Solved "green screen" artifacts, diagonal shearing, and Segmentation Faults caused by hardware ISP memory padding.
+* **Raw Memory Copy:** C++ core now performs a fast `memcpy` of the entire buffer (including padding) instead of attempting to strip it row-by-row. This significantly improves stability.
+* **API Update:** `get_frame_properties()` now returns a 4-tuple: `(width, height, format, stride)`.
+* **Python Handling:** All example scripts (`demo_python.py`, `demo_python_preview.py`, `spider_preview_gui.py`) updated to implement Stride-aware reshaping and cropping.
+* **Cleaned Codebase:** Removed deprecated RAW10 unpacking logic and unused legacy code.
+
 
 ### v1.0 — Full Release (planned)
 
@@ -283,6 +289,7 @@ To be defined.
 * [x] v0.4 — GPIO trigger
 * [x] v0.5 — GUI Preview & Stability Optimization. WIP: Needs better synchronization debugging in real operating conditions. 
 	Considering on-the-fly software adjustment of phase shift and extending light frames by several camera frames.
+* [x] v0.6 — Stride Handling & RPi 5 Stability (Raw Memory Copy, API update for hardware padding).
 * [ ] v1.0 — Production release
 
 
