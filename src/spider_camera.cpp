@@ -1,7 +1,8 @@
 /*
  * spider_camera.cpp
  *
- * Implementation file for the SpiderCamera library (v0.6 - Stride Fix).
+ * Implementation file for the SpiderCamera library (v0.6.1 - FPS Calc).
+ * v0.6.1: Implemented physical FPS calculation (Hardware timestamps).
  * v0.6: 
  * 1. Implemented Raw Memory Copy in handle_request_complete (fixes SegFaults/Padding issues).
  * 2. Added stride reporting in get_frame_properties.
@@ -94,14 +95,32 @@ void SpiderCamera::release_camera() {
 void SpiderCamera::stop() {
     if (state_ == 0) return;
     LOG_INFO("Stopping camera...");
+    
+    // 🎯 v0.6.1: Calculate FPS if we were streaming
     if (state_ == 2) {
+        // Stop streaming logic
         streaming_ = false;
+        
+        // --- FPS CALCULATION ---
+        if (valid_frames_count_ > 1) {
+            auto duration_us = std::chrono::duration_cast<std::chrono::microseconds>(end_time_ - start_time_).count();
+            double duration_sec = duration_us / 1000000.0;
+            if (duration_sec > 0.0001) {
+                last_calculated_fps_ = static_cast<float>((valid_frames_count_ - 1) / duration_sec);
+                LOG_INFO("Capture finished. Calculated FPS: " << last_calculated_fps_);
+            }
+        } else {
+            last_calculated_fps_ = 0.0f;
+        }
+        // -----------------------
+
         if (stream_thread_ && stream_thread_->joinable()) {
             stream_thread_->detach();
         }
         stream_thread_.reset();
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
+    
     try {
         std::atomic<bool> stop_done{false};
         std::thread stop_thread([this, &stop_done]() {
@@ -142,6 +161,7 @@ void SpiderCamera::stop() {
     frame_width_ = 0;
     frame_height_ = 0;
     stride_ = 0; // Reset stride
+    
     LOG_INFO("Camera stopped (state 0)");
 }
 
@@ -326,7 +346,7 @@ void SpiderCamera::set_frame_trigger_pin(int pin_num) {
     if (gpio_chip_) { gpiod_chip_close(gpio_chip_); }
 
     try {
-        // 🎯 v0.4.4: Fixed for RPi 5 (gpiochip4)
+        // 識 v0.4.4: Fixed for RPi 5 (gpiochip4)
         const char* chip_name = "gpiochip4";
         gpio_chip_ = gpiod_chip_open_by_name(chip_name);
         if (!gpio_chip_) {
@@ -388,6 +408,12 @@ void SpiderCamera::go() {
         throw std::runtime_error("Camera must be in ready state (1).");
     }
     LOG_INFO("Starting streaming...");
+
+    // 🎯 v0.6.1: Reset FPS calculation variables
+    valid_frames_count_ = 0;
+    last_calculated_fps_ = 0.0f;
+    first_valid_frame_received_ = false;
+
     {
         std::lock_guard<std::mutex> lock(frame_buffer_mutex_);
         frame_data_buffer_.clear();
@@ -425,7 +451,8 @@ void SpiderCamera::go() {
         streaming_ = true;
         frame_count_ = 0;
         error_count_ = 0;
-        fps_start_time_ = std::chrono::steady_clock::now();
+        fps_start_time_ = std::chrono::steady_clock::now(); // For logging only
+        
         stream_thread_ = std::make_unique<std::thread>(&SpiderCamera::stream_loop, this);
         state_ = 2;
         LOG_INFO("Streaming started (state 2)");
@@ -441,6 +468,21 @@ void SpiderCamera::go() {
 void SpiderCamera::pause() {
     if (state_ != 2) throw std::runtime_error("Camera is not streaming.");
     LOG_INFO("Pausing streaming...");
+    
+    // 🎯 v0.6.1: Calculate FPS upon pausing
+    if (streaming_) {
+         if (valid_frames_count_ > 1) {
+            auto duration_us = std::chrono::duration_cast<std::chrono::microseconds>(end_time_ - start_time_).count();
+            double duration_sec = duration_us / 1000000.0;
+            if (duration_sec > 0.0001) {
+                last_calculated_fps_ = static_cast<float>((valid_frames_count_ - 1) / duration_sec);
+                LOG_INFO("Paused. Series FPS: " << last_calculated_fps_);
+            }
+        } else {
+            last_calculated_fps_ = 0.0f;
+        }
+    }
+
     py::gil_scoped_release release_gil;
     streaming_ = false;
     if (stream_thread_) {
@@ -510,13 +552,24 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
         return;
     }
 
-    // --- FPS Logger ---
+    // 🎯 v0.6.1: Physical FPS Timestamping
+    {
+        auto now = std::chrono::steady_clock::now();
+        if (!first_valid_frame_received_) {
+            start_time_ = now;
+            first_valid_frame_received_ = true;
+        }
+        end_time_ = now;
+        valid_frames_count_++;
+    }
+
+    // --- FPS Logger (Visual only) ---
     if (frame_count_ % 10 == 0) {
         auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - fps_start_time_).count();
         if (elapsed > 0) {
             double fps = 10000.0 / elapsed;
-            LOG_INFO("Frame rate: " << std::fixed << std::setprecision(1) << fps << " fps");
+            LOG_INFO("Frame rate (log): " << std::fixed << std::setprecision(1) << fps << " fps");
         }
         fps_start_time_ = now;
     }
@@ -529,8 +582,6 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
     }
 
     // Calculate total span of the buffer in memory
-    // Typically YUV420 comes as one contiguous block, but mapped via multiple planes.
-    // We use the offset of the last plane + its length to get the full size.
     const auto &first_plane = planes[0];
     const auto &last_plane = planes[planes.size() - 1];
     size_t total_span = (last_plane.offset - first_plane.offset) + last_plane.length;
@@ -541,7 +592,6 @@ void SpiderCamera::handle_request_complete(libcamera::Request *request) {
     if (buffer_base_ptr != MAP_FAILED) {
         try {
             // Allocate vector for the RAW buffer (including stride padding)
-            // This is much faster than strided copy loop
             std::vector<uint8_t> frame_data(total_span);
             
             // Memcpy everything
@@ -591,6 +641,11 @@ py::tuple SpiderCamera::get_frame_properties() {
                           stride_);
 }
 
+// 🎯 v0.6.1: New FPS Getter
+float SpiderCamera::get_last_series_fps() const {
+    return last_calculated_fps_;
+}
+
 py::list SpiderCamera::get_burst_frames() {
     std::vector<std::vector<uint8_t>> frames_to_process;
     {
@@ -602,13 +657,8 @@ py::list SpiderCamera::get_burst_frames() {
     
     py::list frame_list;
 
-    // Pre-allocate numpy arrays to avoid GIL locking issues during allocation if possible
-    // Note: In this version, we just copy data directly.
+    py::gil_scoped_release release_gil;
     
-    py::gil_scoped_release release_gil; // Release GIL for memory ops if possible (mostly useful if we did more heavy lifting)
-    
-    // Wait, to create py::array we NEED the GIL. 
-    // So we re-acquire it implicitly when calling Python API.
     py::gil_scoped_acquire acquire_gil;
 
     try {

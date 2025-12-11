@@ -12,6 +12,7 @@ SpiderCamera is a C++ wrapper around libcamera designed for high-speed RAW frame
 * 💾 In-memory "burst" frame buffering via `get_burst_frames()`.
 * ✅ **Hot parameter changes** (ISO, exposure, resolution, focus) via Python setters.
 * ✅ **Per-frame GPIO hardware trigger** support (for flash/strobe sync).
+* ✅ **Hardware-level FPS Calculation** via `get_last_series_fps()` (eliminates Python timing jitter).
 ## Requirements
 
 * Raspberry Pi with libcamera support
@@ -131,6 +132,7 @@ The intended pipeline consists of two stages:
 * `get_frame_properties() -> tuple` — **(UPDATED in v0.6)** returns metadata required to reconstruction the image:
   * Returns: `(width, height, format, stride)`
   * `stride` (int): The actual number of bytes per row in memory (including hardware padding). Critical for reshaping.
+* `get_last_series_fps() -> float` — **(NEW in v0.7)** Returns the precise average FPS of the last capture burst, calculated using C++ hardware timestamps (excludes warmup frames).
 ### Hot Parameters (v0.3)
 
 *Implementation: These setters store values which are applied during `be_ready()` and `go()`.*
@@ -265,6 +267,15 @@ The library includes three Python scripts to verify functionality and performanc
 * **Cleaned Codebase:** Removed deprecated RAW10 unpacking logic and unused legacy code.
 
 
+### v0.7 — Hardware FPS & Precision (2025-12-11)
+
+**Status:** ✅ Complete and tested
+
+**Features:**
+* **Physical FPS Calculation:** Implemented logic in C++ to measure frame rates using hardware monotonic clocks (`std::chrono::steady_clock`).
+* **Precision:** Calculates FPS based on the exact interval between the first valid frame (after warmup) and the last frame, eliminating Python GIL latency and context-switching jitter.
+* **New API:** Added `get_last_series_fps()` to retrieve the calculated value after a burst.
+
 ### v1.0 — Full Release (planned)
 
 To be defined.
@@ -290,6 +301,7 @@ To be defined.
 * [x] v0.5 — GUI Preview & Stability Optimization. WIP: Needs better synchronization debugging in real operating conditions. 
 	Considering on-the-fly software adjustment of phase shift and extending light frames by several camera frames.
 * [x] v0.6 — Stride Handling & RPi 5 Stability (Raw Memory Copy, API update for hardware padding).
+* [x] v0.7 — Hardware FPS Calculation.
 * [ ] v1.0 — Production release
 
 

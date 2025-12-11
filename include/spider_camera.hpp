@@ -1,7 +1,8 @@
 /*
  * spider_camera.hpp
  *
- * Header file for the SpiderCamera library (v0.6 - Stride Fix).
+ * Header file for the SpiderCamera library (v0.6.1 - FPS Calc).
+ * v0.6.1: Added physical FPS calculation logic.
  * v0.6: Added 'stride_' field to handle hardware padding correctly.
  * v0.4.3: Switched to C-API gpiod.h to fix linking errors.
  */
@@ -56,6 +57,9 @@ public:
     // 🎯 v0.6: Оновлена сигнатура: повертає (width, height, format, stride)
     py::tuple get_frame_properties();
 
+    // 🎯 v0.6.1: Новий метод для отримання фізичного FPS
+    float get_last_series_fps() const;
+
     // --- v0.3: Hot Parameters ---
     void set_iso(int iso);
     void set_exposure(int exposure_us);
@@ -104,7 +108,7 @@ private:
     
     std::atomic<int> error_count_{0};
     std::atomic<uint64_t> frame_count_{0};
-    std::chrono::steady_clock::time_point fps_start_time_;
+    std::chrono::steady_clock::time_point fps_start_time_; // Used for logging only
     
     uint32_t frame_width_ = 0;
     uint32_t frame_height_ = 0;
@@ -112,7 +116,7 @@ private:
     // 🎯 v0.6: New field for Hardware Stride (Padding)
     uint32_t stride_ = 0;
 
-    // Legacy fields (kept to avoid heavy refactoring of unused parts, but unused in v0.6 logic)
+    // Legacy fields
     uint32_t frame_stride_y_ = 0;
     uint32_t frame_stride_uv_ = 0;
     libcamera::PixelFormat current_pixel_format_;
@@ -133,6 +137,13 @@ private:
     int trigger_pin_num_ = -1;
     struct gpiod_chip *gpio_chip_ = nullptr;
     struct gpiod_line *gpio_trigger_line_ = nullptr;
+
+    // 🎯 v0.6.1: Variables for Precise FPS Calculation
+    std::chrono::time_point<std::chrono::steady_clock> start_time_;
+    std::chrono::time_point<std::chrono::steady_clock> end_time_;
+    size_t valid_frames_count_ = 0;      // Count frames that actually go into buffer (post-warmup)
+    bool first_valid_frame_received_ = false; 
+    float last_calculated_fps_ = 0.0f;
 };
 
 #endif // SPIDER_CAMERA_HPP

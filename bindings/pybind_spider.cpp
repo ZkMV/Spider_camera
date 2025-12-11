@@ -2,6 +2,7 @@
  * pybind_spider.cpp
  *
  * Pybind11 wrapper definitions for the SpiderCamera library.
+ * v0.6.1: Added binding for get_last_series_fps().
  * v0.4.1: Added bindings for GPIO trigger functions.
  */
 
@@ -13,7 +14,7 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(spider_camera, m) {
-    m.doc() = "SpiderCamera: A C++ libcamera wrapper for high-speed capture (v0.4.1 YUV+GPIO)";
+    m.doc() = "SpiderCamera: A C++ libcamera wrapper for high-speed capture (v0.6.1 Stride+FPS)";
 
     py::class_<SpiderCamera>(m, "SpiderCamera")
         .def(py::init<>(), "Initializes the camera manager")
@@ -32,7 +33,11 @@ PYBIND11_MODULE(spider_camera, m) {
         .def("enable_debug", &SpiderCamera::enable_debug, py::arg("enable"), "Enable or disable debug logging")
         .def("get_burst_frames", &SpiderCamera::get_burst_frames, "Get all buffered frames (YUV data)")
         .def("get_frame_properties", &SpiderCamera::get_frame_properties,
-             "Returns (width, height, format_string) of the stream")
+             "Returns (width, height, format_string, stride) of the stream")
+        
+        // 🎯 v0.6.1: FPS Getter
+        .def("get_last_series_fps", &SpiderCamera::get_last_series_fps, 
+             "Returns the calculated physical FPS based on hardware timestamps of the last burst")
 
         // --- v0.3: Hot Parameters ---
         .def("set_iso", &SpiderCamera::set_iso, 

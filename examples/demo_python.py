@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-demo_python.py - v0.6 (Stride Aware)
+demo_python.py - v0.6.1 (Stride Aware + Hardware FPS)
 
-Цей скрипт демонструє використання SpiderCamera v0.6 з підтримкою
-апаратного вирівнювання (padding/stride).
+Цей скрипт демонструє використання SpiderCamera v0.6.1 з підтримкою:
+1. Апаратного вирівнювання (padding/stride).
+2. Отримання точного апаратного FPS (get_last_series_fps).
 
 Основні кроки:
 1. Ініціалізація камери.
 2. Отримання stride (кроку рядка) через get_frame_properties().
-3. Захоплення серії кадрів ("сирі" дані з padding).
-4. Правильний reshape та crop (обрізка сміття) перед збереженням.
+3. Захоплення серії кадрів.
+4. Виведення реального FPS, розрахованого драйвером.
+5. Правильний reshape та crop (обрізка сміття) перед збереженням.
 """
 
 import sys
@@ -46,7 +48,7 @@ SAVE_PATH = os.path.join(project_root, "temp")
 # ============================================
 
 def main():
-    print(f"=== SpiderCamera Burst Test (v0.6 - Stride Fixed) ===\n")
+    print(f"=== SpiderCamera Burst Test (v0.6.1 - FPS + Stride) ===\n")
     
     # 1. Load Config
     try:
@@ -87,7 +89,6 @@ def main():
         cam.be_ready() 
         
         # 🎯 v0.6: ОТРИМАННЯ STRIDE (КРОК РЯДКА)
-        # Тепер метод повертає 4 значення!
         width, height, pixel_format_str, stride = cam.get_frame_properties()
         
         print(f"\n✅ CAMERA PROPERTIES (Hardware):")
@@ -97,7 +98,6 @@ def main():
         print(f"   Format: {pixel_format_str}")
         
         # Визначаємо висоту YUV буфера (Y + UV)
-        # Для YUV420/NV12 загальна висота = height * 1.5
         yuv_height = int(height * 1.5)
         
         # Вибір конвертера OpenCV
@@ -116,7 +116,13 @@ def main():
         time.sleep(CAPTURE_DURATION_SEC)
         cam.pause()
         
-        print("Fetching frames...")
+        # 🎯 v0.6.1: ОТРИМАННЯ ФІЗИЧНОГО FPS
+        # Значення розраховано в C++ на основі hardware timestamps
+        actual_fps = cam.get_last_series_fps()
+        print(f"\n⏱️  HARDWARE PERFORMANCE:")
+        print(f"   Actual FPS: {actual_fps:.2f} frames/sec")
+
+        print("\nFetching frames...")
         frame_list = cam.get_burst_frames()
         print(f"Captured {len(frame_list)} frames.")
         
@@ -130,21 +136,15 @@ def main():
         for i, flat_frame in enumerate(frame_list):
             try:
                 # 1. Перевіряємо, чи ділиться буфер на stride без залишку
-                # Інколи буфер може мати ще додатковий паддінг в самому кінці
                 rows_in_buffer = flat_frame.size // stride
                 
                 # 2. Інтерпретуємо як 2D масив (Rows x Stride)
-                # Обрізаємо хвіст, якщо він не повний рядок
                 view_2d = flat_frame[:rows_in_buffer*stride].reshape((rows_in_buffer, stride))
                 
                 # 3. CROP: Відрізаємо "сміття" (padding) справа
-                # Беремо тільки перші 'width' колонок
-                # Також беремо тільки 'yuv_height' рядків (на випадок зайвих рядків знизу)
                 image_data_cropped = view_2d[:yuv_height, :width]
                 
                 # 4. Конвертація YUV -> BGR (вже на "чистих" даних)
-                # Важливо: OpenCV очікує contiguous array, reshape може створити view.
-                # np.ascontiguousarray гарантує правильну пам'ять для C++ OpenCV
                 bgr_image = cv2.cvtColor(np.ascontiguousarray(image_data_cropped), color_cvt_code)
                 
                 # Збереження
@@ -159,7 +159,7 @@ def main():
                 print(f"❌ Error processing frame {i}: {e}")
                 import traceback
                 traceback.print_exc()
-                break # Stop on error to avoid spam
+                break 
 
     except Exception as e:
         print(f"Global Error: {e}")
